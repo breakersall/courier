@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - What courier does, config, deployment: README.md
 - Tasks: `justfile` (`just check` = what CI runs); lint rules: `pyproject.toml`
 - Single test: `uv run pytest tests/test_loop.py::test_name`
+- uv docs index: https://docs.astral.sh/uv/llms.txt
 
 ## Architecture
 
