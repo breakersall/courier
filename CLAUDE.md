@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `loop.run`: loads limiter state, builds sources (`sources.build_source`), runs one `poll_forever` task per source in a `TaskGroup`; each task calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
 - Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Alert]`).
 - Delivery: `loop.deliver` → `limiter.allowed` → `targets/ntfy.py` → `limiter.record`. State key `(source_name, alert.key)`, persisted by `state.py`.
+- `loop.deliver` runs only after a successful poll; it deletes state for that source's keys missing from the poll, so a cleared event's next match starts a fresh budget.
 - `alert.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
 - Source package layout (`sources/fi`, `sources/metra`):
   - `settings.py`: pydantic models, events are a discriminated union on `type`

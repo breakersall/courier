@@ -51,21 +51,17 @@ def _today(state: LimiterState, t: datetime.datetime) -> LimiterState:
     return state if state.window_date == t.date() else LimiterState(window_date=t.date())
 
 
-def allowed(
-    state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int | None
-) -> bool:
+def allowed(state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int) -> bool:
     """Returns whether a notification may be sent at `t`.
 
     Args:
         state: Current bookkeeping for the alert.
         t: Aware time in the configured timezone.
         window: Delivery window; None means the whole day.
-        max_per_window: Cap on sends per window day; None means unlimited.
+        max_per_window: Cap on sends per window day.
     """
     if window_bounds(t, window) is None:
         return False
-    if max_per_window is None:
-        return True
 
     state = _today(state, t)
     if state.sent >= max_per_window:
@@ -75,7 +71,7 @@ def allowed(
 
 
 def record(
-    state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int | None
+    state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int
 ) -> LimiterState:
     """Accounts for a successful send at `t`.
 
@@ -86,7 +82,7 @@ def record(
         state: Current bookkeeping for the alert.
         t: Aware time of the send, in the configured timezone.
         window: Delivery window; None means the whole day.
-        max_per_window: Cap on sends per window day; None means unlimited.
+        max_per_window: Cap on sends per window day.
 
     Returns:
         The updated state.
@@ -95,7 +91,7 @@ def record(
     sent = state.sent + 1
     bounds = window_bounds(t, window)
 
-    if max_per_window is None or sent >= max_per_window or bounds is None:
+    if sent >= max_per_window or bounds is None:
         return dataclasses.replace(state, sent=sent, next_allowed=None)
 
     # same-tzinfo subtraction ignores DST, so do slot math in UTC

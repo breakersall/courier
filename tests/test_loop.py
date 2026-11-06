@@ -9,6 +9,7 @@ import zoneinfo
 import httpx
 import pytest
 
+from courier import limiter
 from courier import loop
 from courier import message
 from courier import metrics
@@ -58,9 +59,10 @@ def target(window: dict[str, str] | None = None) -> dict[str, ntfy.NtfyTarget]:
 
 
 def alert(limit: int | None = 2, priority: str | None = None, key: str = "Rex:battery_low:phone") -> message.Alert:
-    event = fi_settings.BatteryLow.model_validate(
-        {"type": "battery_low", "target": "phone", "max_per_window": limit, "priority": priority}
-    )
+    raw = {"type": "battery_low", "target": "phone", "priority": priority}
+    if limit is not None:
+        raw["max_per_window"] = limit
+    event = fi_settings.BatteryLow.model_validate(raw)
     return message.Alert(key, event, MSG)
 
 
@@ -90,6 +92,24 @@ async def test_deliver_respects_limit() -> None:
     states = await deliver_at(ntfy_, [alert()], at(8), at(8, 5), at(14), start="08:00", end="20:00")
     assert len(ntfy_.requests) == 2
     assert states[("dogs", "Rex:battery_low:phone")].sent == 2
+
+
+async def test_deliver_default_once_per_window() -> None:
+    ntfy_ = Ntfy()
+    await deliver_at(ntfy_, [alert(limit=None)], at(8), at(12), at(19))
+    assert len(ntfy_.requests) == 1
+
+
+async def test_deliver_cleared_alert_starts_fresh_budget() -> None:
+    ntfy_ = Ntfy()
+    states: loop.States = {("other", "Rex:battery_low:phone"): limiter.LimiterState()}
+
+    async with ntfy_.client() as http:
+        for alerts in ([alert(limit=1)], [alert(limit=1)], [], [alert(limit=1)]):
+            await loop.deliver("dogs", alerts, target(), http, states, at(9))
+
+    assert len(ntfy_.requests) == 2
+    assert ("other", "Rex:battery_low:phone") in states  # other sources' state untouched
 
 
 def notifications(result: str) -> float:
@@ -274,6 +294,23 @@ async def test_source_error_keeps_running(
     await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 120))
     assert "upstream down" in caplog.text
     assert len(ntfy_mock.requests) == 1
+
+
+async def test_failed_poll_does_not_clear(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
+) -> None:
+    results = [[alert(limit=1)], message.SourceError("down"), [alert(limit=1)]]
+    patch_sources(monkeypatch, {"dogs": FakeSource(results)})
+    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
+    assert len(ntfy_mock.requests) == 1
+
+
+async def test_cleared_poll_notifies_again(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
+) -> None:
+    patch_sources(monkeypatch, {"dogs": FakeSource([[alert(limit=1)], [], [alert(limit=1)]])})
+    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
+    assert len(ntfy_mock.requests) == 2
 
 
 async def test_state_saved_and_pruned(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:

@@ -40,7 +40,9 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
 ) -> bool:
     """Sends the alerts the limiter allows, recording each successful send in `states`.
 
-    Failed sends are logged, not raised, and do not stop the remaining alerts.
+    Failed sends are logged, not raised, and do not stop the remaining alerts. Call only
+    after a successful poll: state for this source's keys missing from `alerts` is deleted,
+    so the next match of a cleared event starts a fresh budget.
 
     Args:
         source_name: Configured source name; first half of the state key.
@@ -51,7 +53,7 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
         now: Current time in the configured timezone.
 
     Returns:
-        Whether anything was sent.
+        Whether `states` changed.
     """
     sent = False
 
@@ -83,7 +85,12 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
         states[key] = limiter.record(current, now, target.window, event.max_per_window)
         sent = True
 
-    return sent
+    matching = {(source_name, a.key) for a in alerts}
+    cleared = [key for key in states if key[0] == source_name and key not in matching]
+    for key in cleared:
+        del states[key]
+
+    return sent or bool(cleared)
 
 
 def _save(cfg: settings.Settings, states: States, now: datetime.datetime) -> None:

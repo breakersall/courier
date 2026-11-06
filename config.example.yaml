@@ -23,7 +23,7 @@ sources:
             threshold: 40
             suppress_when_charging: true
             target: phone
-            max_per_window: 2      # Optional, omit to send on every matching poll
+            max_per_window: 2      # Optional, default 1 per window while it keeps matching
           - type: collar_offline
             minutes: 60
             target: phone
@@ -38,9 +38,9 @@ sources:
       - line: BNSF                 # Metra line id
         number: "1254"             # Train number, as a string
         events:
-          - { type: train_delayed, minutes: 5, target: phone, max_per_window: 2 }   # minutes defaults to 5; no default cap
-          - { type: train_cancelled, target: phone }             # max_per_window defaults to 1
+          - { type: train_delayed, minutes: 5, target: phone, max_per_window: 2 }   # minutes defaults to 5
+          - { type: train_cancelled, target: phone }
     lines:
       - id: BNSF
         events:
-          - { type: service_alert, target: phone }               # max_per_window defaults to 1
+          - { type: service_alert, target: phone }

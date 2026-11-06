@@ -110,13 +110,13 @@ class EventBase(Model):
     Attributes:
         type: Event kind; subclasses narrow it to a `Literal`.
         target: Name of the target to deliver to.
-        max_per_window: Cap on notifications per delivery window; None means unlimited.
+        max_per_window: Cap on notifications per delivery window while the event keeps matching.
         priority: ntfy priority override; None means the source default.
     """
 
     type: str
     target: str
-    max_per_window: int | None = pydantic.Field(default=None, ge=1)
+    max_per_window: int = pydantic.Field(default=1, ge=1)
     priority: Priority | None = None
 
 

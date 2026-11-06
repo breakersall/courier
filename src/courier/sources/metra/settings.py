@@ -25,11 +25,9 @@ class TrainCancelled(models.EventBase):
 
     Attributes:
         type: Always "train_cancelled".
-        max_per_window: Defaults to 1.
     """
 
     type: Literal["train_cancelled"]
-    max_per_window: int | None = pydantic.Field(default=1, ge=1)
 
 
 class ServiceAlert(models.EventBase):
@@ -37,11 +35,9 @@ class ServiceAlert(models.EventBase):
 
     Attributes:
         type: Always "service_alert".
-        max_per_window: Defaults to 1.
     """
 
     type: Literal["service_alert"]
-    max_per_window: int | None = pydantic.Field(default=1, ge=1)
 
 
 TrainEvent = Annotated[TrainDelayed | TrainCancelled, pydantic.Field(discriminator="type")]

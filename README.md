@@ -53,27 +53,27 @@ The source needs a Metra API token. It downloads the static GTFS schedule at sta
 
 Trains are identified by `line` and `number`, and lines by `id` (BNSF, HC, MD-N, MD-W, ME, NCS, RI, SWS, UP-N, UP-NW, UP-W).
 
-| Type | Applies To | Fires When | Default `max_per_window` |
-|---|---|---|---|
-| `train_delayed` | train | the train is late by at least `minutes` (default 5) at its next stop | none |
-| `train_cancelled` | train | the train is cancelled | 1 |
-| `service_alert` | line | Metra has an alert in effect for the line | 1 |
+| Type | Applies To | Fires When |
+|---|---|---|
+| `train_delayed` | train | the train is late by at least `minutes` (default 5) at its next stop |
+| `train_cancelled` | train | the train is cancelled |
+| `service_alert` | line | Metra has an alert in effect for the line |
 
-Cancellations and alerts can last hours, so they default to one notification per window.
+With the default `max_per_window` of 1, a delay that grows sends no new notification. Set a higher `max_per_window` on `train_delayed` for updates.
 
 > [!IMPORTANT]
 > Metra limits the realtime API to 200 requests per undocumented period. Each poll makes up to 2 requests, so the default 120-second interval stays well below the limit. The remaining count is exported as a [metric](#metrics) and logged as a warning below 20.
 
 ## Windows and Rate Limits
 
-The service drops notifications outside a target's `window`. Add `days` to limit the window to certain weekdays, for example `{ start: "08:00", end: "20:00", days: [mon, tue, wed, thu, fri] }`.
+An event sends a notification when it starts matching. While it keeps matching, `max_per_window` (default 1) limits the notifications per window, and the budget resets each day. When a successful poll no longer matches the event, the budget resets, so the next match notifies right away. A failed poll does not reset it.
 
-Without `max_per_window`, every matching poll sends a notification. With `max_per_window: N`, each send splits the *remaining* window evenly between the remaining sends. For a 08:00–20:00 window and `N = 2`:
+The service sends nothing outside a target's `window`. An event that is still matching when the window opens is sent then. Add `days` to limit the window to certain weekdays, for example `{ start: "08:00", end: "20:00", days: [mon, tue, wed, thu, fri] }`.
+
+With `max_per_window: N`, each send splits the *remaining* window evenly between the remaining sends. For a 08:00–20:00 window and `N = 2`:
 
 - Battery low from 08:00: notified at 08:00 and 14:00.
 - Battery low first at 18:00: notified at 18:00 and 19:00.
-
-The budget resets daily, not when a condition clears and returns.
 
 > [!IMPORTANT]
 > Windows cannot cross midnight. For example, `22:00`–`06:00` is not supported.

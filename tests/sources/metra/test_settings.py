@@ -32,7 +32,7 @@ def test_defaults() -> None:
     assert cfg.poll_interval == 120
     assert isinstance(delayed, settings.TrainDelayed)
     assert delayed.minutes == 5
-    assert delayed.max_per_window is None
+    assert delayed.max_per_window == 1
     assert cancelled.max_per_window == 1
     assert cfg.lines[0].events[0].max_per_window == 1
     assert len(list(cfg.events())) == 3

@@ -49,7 +49,7 @@ def test_shared_budget_after_clear() -> None:
 
 
 def test_outside_window_denied() -> None:
-    assert limiter.allowed(limiter.LimiterState(), at(7, 59), DAY, None) is False
+    assert limiter.allowed(limiter.LimiterState(), at(7, 59), DAY, 1) is False
     assert limiter.allowed(limiter.LimiterState(), at(20), DAY, 2) is False
 
 
@@ -59,13 +59,6 @@ def test_day_rollover_resets() -> None:
     assert limiter.allowed(s, at(8, day=10), DAY, 1) is True
     s = limiter.record(s, at(8, day=10), DAY, 1)
     assert s.sent == 1
-
-
-def test_no_limit_always_in_window() -> None:
-    s = limiter.LimiterState()
-    for _ in range(3):
-        assert limiter.allowed(s, at(8), DAY, None) is True
-        s = limiter.record(s, at(8), DAY, None)
 
 
 def test_no_window_full_day() -> None:
@@ -84,4 +77,4 @@ def test_window_days() -> None:
     weekdays = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "fri"])
     assert limiter.window_bounds(at(9), weekdays) == (at(8), at(20))  # Fri
     assert limiter.window_bounds(at(9, day=10), weekdays) is None  # Sat
-    assert limiter.allowed(limiter.LimiterState(), at(9, day=10), weekdays, None) is False
+    assert limiter.allowed(limiter.LimiterState(), at(9, day=10), weekdays, 1) is False
