@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-- `loop.run`: loads limiter state, builds sources (`sources.build_source`), calls `start()` on each, runs one `poll_forever` task per source in a `TaskGroup`. Shared: one `httpx.AsyncClient`, the `states` dict, the health monitor.
+- `loop.run`: loads limiter state, builds sources (`sources.build_source`), runs one `poll_forever` task per source in a `TaskGroup`; each task calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
 - Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Alert]`).
 - Delivery: `loop.deliver` → `limiter.allowed` → `targets/ntfy.py` → `limiter.record`. State key `(source_name, alert.key)`, persisted by `state.py`.
 - `alert.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
@@ -20,9 +20,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Metrics: shared ones (`source`/`target` label) in `metrics.py`; ones only one source or target produces in that package's `client.py`, on `metrics.REGISTRY`.
 - New source: add to `SourceConfig` and the `match` in `sources/__init__.py`.
 - Shared config bases (`EventBase`, `Window`, `_file` secrets): `models.py`. Root settings: `settings.py`.
-- Errors:
-  - `SourceAuthError` → process exits (restart backoff avoids account lockout)
-  - `SourceError`, `httpx.HTTPError`, `ValueError` in `start()` → process exits (caught in `loop.run`, not in sources)
+- Errors (caught in `loop.run`, never in sources; sources never raise `SystemExit`):
+  - `SourceAuthError`, `SourceConfigError` in `start()` → process exits
+  - `SourceAuthError` in a poll → that source stops until restart (avoids account lockout); others keep running
+  - `SourceError`, `httpx.HTTPError`, `ValueError` in `start()` → logged, retried next interval
   - `SourceError`, `httpx.HTTPError`, `ValueError` in a poll → logged, poll skipped
   - failed send → logged, remaining alerts still sent
 

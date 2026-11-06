@@ -64,7 +64,8 @@ async def test_http_200_503_404() -> None:
         assert (await get(port, "/healthz")).startswith(b"HTTP/1.1 200 OK")
 
         clock.now += 1000
-        assert (await get(port, "/healthz")).startswith(b"HTTP/1.1 503 Service Unavailable")
+        assert (await get(port, "/readyz")).startswith(b"HTTP/1.1 503 Service Unavailable")
+        assert (await get(port, "/healthz")).startswith(b"HTTP/1.1 200 OK")
         assert (await get(port, "/x")).startswith(b"HTTP/1.1 404 Not Found")
 
 
@@ -77,7 +78,7 @@ async def test_one_stale_source_is_unhealthy() -> None:
     assert monitor.stale() == ["commute"]
 
     async with serving(monitor) as port:
-        data = await get(port, "/healthz")
+        data = await get(port, "/readyz")
         assert data.startswith(b"HTTP/1.1 503")
         assert b"commute" in data.split(b"\r\n\r\n", 1)[1]
 

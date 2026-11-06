@@ -37,8 +37,8 @@ async def test_start_ok() -> None:
     await source("Rex").start()
 
 
-async def test_start_missing_collar_exits() -> None:
-    with pytest.raises(SystemExit, match=r"Ghost.*available: Bella, Broken, Rex"):
+async def test_start_missing_collar_raises() -> None:
+    with pytest.raises(message.SourceConfigError, match=r"Ghost.*available: Bella, Broken, Rex"):
         await source("Ghost").start()
 
 

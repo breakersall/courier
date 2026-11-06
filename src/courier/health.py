@@ -1,4 +1,4 @@
-"""Minimal /healthz and /metrics endpoints on stdlib asyncio."""
+"""Minimal /healthz, /readyz, and /metrics endpoints on stdlib asyncio."""
 
 import asyncio
 from collections.abc import Callable
@@ -38,10 +38,10 @@ async def serve_health(
     port: int,
     host: str = "0.0.0.0",  # noqa: S104 - must be reachable by Kubernetes probes
 ) -> asyncio.Server:
-    """Starts the HTTP server for /healthz and /metrics.
+    """Starts the HTTP server for /healthz, /readyz, and /metrics.
 
-    /healthz returns 200, or 503 naming the stale sources. /metrics returns Prometheus
-    metrics. Any other path returns 404.
+    /healthz returns 200 while the event loop serves requests. /readyz returns 200, or 503
+    naming the stale sources. /metrics returns Prometheus metrics. Any other path returns 404.
 
     Args:
         health: Health tracker to report.
@@ -63,10 +63,10 @@ async def serve_health(
                 status = "200 OK"
                 body = metrics.render()
                 content_type = prometheus_client.CONTENT_TYPE_LATEST
-            elif path != b"/healthz":
+            elif path not in {b"/healthz", b"/readyz"}:
                 status = "404 Not Found"
                 body = status.encode()
-            elif not stale:
+            elif path == b"/healthz" or not stale:
                 status = "200 OK"
                 body = status.encode()
             else:

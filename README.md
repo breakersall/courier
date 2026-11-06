@@ -55,7 +55,7 @@ Trains are identified by `line` and `number`, and lines by `id` (BNSF, HC, MD-N,
 
 | Type | Applies To | Fires When | Default `max_per_window` |
 |---|---|---|---|
-| `train_delayed` | train | the train is late by at least `minutes` (default 5) | none |
+| `train_delayed` | train | the train is late by at least `minutes` (default 5) at its next stop | none |
 | `train_cancelled` | train | the train is cancelled | 1 |
 | `service_alert` | line | Metra has an alert in effect for the line | 1 |
 
@@ -99,6 +99,7 @@ There are no manifests in this repository. To run courier on Kubernetes:
 - Run one replica, with the `Recreate` strategy. A second replica sends every notification twice.
 - Put `state_file` on a PersistentVolumeClaim, so the rate-limit budgets survive a restart.
 - Mount the config at `/config/config.yaml`, and the secrets as files (`password_file:`, `token_file:`).
+- Use `/healthz` for the liveness probe. See [Health Check](#health-check).
 
 ### Logging
 
@@ -106,7 +107,11 @@ There are no manifests in this repository. To run courier on Kubernetes:
 
 ### Health Check
 
-`GET /healthz` returns `200` if every source has had a successful poll within the last 3 × its poll interval. Otherwise it returns `503` and names the failing sources. Because any stale source fails the check, a long outage of one upstream (for example Metra) restarts the pod through the liveness probe.
+`GET /healthz` returns `200` while the process is running. Use it as the liveness probe.
+
+`GET /readyz` returns `200` if every source has had a successful poll within the last 3 × its poll interval. Otherwise it returns `503` and names the failing sources.
+
+An upstream outage does not stop the other sources. A source that cannot reach its upstream at startup retries every poll interval. If a source's credentials are rejected at startup, or a configured collar, train, or line does not exist, the process exits. If credentials are rejected later, that source stops until the next restart, so repeated logins cannot lock the account.
 
 ### Metrics
 

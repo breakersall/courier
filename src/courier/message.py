@@ -63,6 +63,10 @@ class SourceAuthError(SourceError):
     """A source's credentials were rejected."""
 
 
+class SourceConfigError(SourceError):
+    """A source's configuration does not match the upstream service, e.g. an unknown collar or train."""
+
+
 def event_keys(entity: str, events: Sequence[models.EventBase]) -> list[str]:
     """Returns a stable limiter-state id per event, parallel to `events`.
 

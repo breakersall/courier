@@ -32,7 +32,7 @@ class FiSource:
         """Fetches pets once and verifies every configured collar exists.
 
         Raises:
-            SystemExit: A configured collar is missing; the message lists available names.
+            SourceConfigError: A configured collar is missing; the message lists available names.
             SourceAuthError: Fi rejected the login.
         """
         await self._client.fetch_pets()
@@ -41,7 +41,9 @@ class FiSource:
 
         if missing:
             available = ", ".join(sorted(names)) or "(none)"
-            raise SystemExit(f"fi: collars not found on Fi account: {', '.join(missing)}; available: {available}")
+            raise message.SourceConfigError(
+                f"collars not found on Fi account: {', '.join(missing)}; available: {available}"
+            )
 
     async def poll(self, now: datetime.datetime) -> list[message.Alert]:
         """Returns one alert per collar event that matches at `now`."""

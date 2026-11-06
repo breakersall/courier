@@ -62,12 +62,12 @@ def env(bn1204_zip) -> Env:
 
 
 async def test_start_missing_train_lists_available(env) -> None:
-    with pytest.raises(SystemExit, match=r"^metra: .*BNSF 9999.*1204"):
+    with pytest.raises(message.SourceConfigError, match=r"^not found in schedule: .*BNSF 9999.*1204"):
         await env.source(trains=[train("BNSF", "9999")]).start()
 
 
 async def test_start_missing_line(env) -> None:
-    with pytest.raises(SystemExit, match=r"^metra: .*XX.*BNSF"):
+    with pytest.raises(message.SourceConfigError, match=r"^not found in schedule: .*XX.*BNSF"):
         await env.source(lines=[line("XX")]).start()
 
 

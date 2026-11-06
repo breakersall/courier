@@ -167,15 +167,23 @@ def test_delay_next_stop_skips_skipped_updates(schedule):
     assert msg.body == "Next stop Cicero, expected 05:59."
 
 
-def test_delay_without_next_stop_time_omits_expected(schedule):
+def test_delay_all_stops_skipped(schedule):
     tu = _real_tu(schedule)
-    first = tu.stop_time_update[0]
-    del tu.stop_time_update[:]  # keep one timed update for the delay, none usable as next stop
-    stu = tu.stop_time_update.add(stop_sequence=first.stop_sequence, stop_id=first.stop_id)
-    stu.arrival.time = first.arrival.time
-    stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+    for stu in tu.stop_time_update:
+        stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+
+    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ) is None
+
+
+def test_delay_measured_at_next_stop(schedule):
+    tu = _tu("BNSF_BN1204_V2_AA")
+    for seq, late in ((25, 2), (26, 10)):  # a later stop forecast as later must not win
+        secs = schedule.arrivals[("BNSF_BN1204_V2_AA", seq)]
+        stu = tu.stop_time_update.add(stop_sequence=seq, stop_id="CICERO")
+        stu.arrival.time = int(gtfs.scheduled_at(TODAY, secs).timestamp()) + late * 60
 
     msg = events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ)
 
     assert msg is not None
-    assert msg.body == f"Next stop {schedule.stop_names[first.stop_id]}."
+    assert msg.title == "BNSF 1204: 2 min late"
+    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(3), TODAY, TZ) is None

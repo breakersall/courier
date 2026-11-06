@@ -60,7 +60,7 @@ class MetraSource:
         """Loads the schedule and verifies every configured train and line exists.
 
         Raises:
-            SystemExit: A train or line is missing from the schedule.
+            SourceConfigError: A train or line is missing from the schedule.
             SourceAuthError: Metra rejected the token.
         """
         schedule = await self._load()
@@ -75,7 +75,7 @@ class MetraSource:
             problems.append(f"lines {', '.join(bad_lines)} (available: {', '.join(sorted(schedule.lines))})")
 
         if problems:
-            raise SystemExit(f"metra: not found in schedule: {'; '.join(problems)}")
+            raise message.SourceConfigError(f"not found in schedule: {'; '.join(problems)}")
 
     async def _refresh(self) -> None:
         if self._clock() - self._last_check < SCHEDULE_CHECK_INTERVAL:

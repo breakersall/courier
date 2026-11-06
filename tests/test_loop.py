@@ -156,14 +156,14 @@ async def test_deliver_unexpected_failure_does_not_skip_rest(
 
 
 class FakeSource:
-    def __init__(self, results: list[Any] | None = None, start_error: BaseException | None = None) -> None:
+    def __init__(self, results: list[Any] | None = None, start_errors: list[BaseException] | None = None) -> None:
         self.results = results or []
-        self.start_error = start_error
+        self.start_errors = start_errors or []
         self.polls = 0
 
     async def start(self) -> None:
-        if self.start_error is not None:
-            raise self.start_error
+        if self.start_errors:
+            raise self.start_errors.pop(0)
 
     async def poll(self, now: datetime.datetime) -> list[message.Alert]:
         self.polls += 1
@@ -203,8 +203,15 @@ def ntfy_mock(monkeypatch: pytest.MonkeyPatch) -> Ntfy:
     return fake
 
 
-def patch_sources(monkeypatch: pytest.MonkeyPatch, fakes: dict[str, FakeSource]) -> None:
-    monkeypatch.setattr(sources, "build_source", lambda name, cfg, http, tz: fakes[name])
+def patch_sources(monkeypatch: pytest.MonkeyPatch, fakes: dict[str, FakeSource]) -> dict[str, httpx.AsyncClient]:
+    clients: dict[str, httpx.AsyncClient] = {}
+
+    def build(name: str, cfg: sources.SourceConfig, http: httpx.AsyncClient, tz: zoneinfo.ZoneInfo) -> FakeSource:
+        clients[name] = http
+        return fakes[name]
+
+    monkeypatch.setattr(sources, "build_source", build)
+    return clients
 
 
 async def test_two_sources_independent_intervals(
@@ -216,32 +223,48 @@ async def test_two_sources_independent_intervals(
     assert (fakes["fast"].polls, fakes["slow"].polls) == (10, 5)
 
 
-async def test_source_auth_error_exits(
+async def test_sources_get_separate_http_clients(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([message.SourceAuthError("rejected")])})
-    with pytest.raises(SystemExit, match="auth failed: rejected"):
-        await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
+    clients = patch_sources(monkeypatch, {"a": FakeSource(), "b": FakeSource()})
+    await loop.run(make_settings(tmp_path, {"a": 60, "b": 60}), wait=VirtualClock(2, 60))
+    assert clients["a"] is not clients["b"]
+
+
+async def test_poll_auth_error_stops_only_that_source(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
+) -> None:
+    fakes = {"bad": FakeSource([message.SourceAuthError("rejected")]), "good": FakeSource()}
+    patch_sources(monkeypatch, fakes)
+    await loop.run(make_settings(tmp_path, {"bad": 60, "good": 60}), wait=VirtualClock(1, 600))
+
+    assert (fakes["bad"].polls, fakes["good"].polls) == (1, 10)
+    assert "bad credentials rejected" in caplog.text
 
 
 async def test_start_auth_error_exits(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource(start_error=message.SourceAuthError("bad login"))})
-    with pytest.raises(SystemExit, match="auth failed: bad login"):
+    patch_sources(monkeypatch, {"dogs": FakeSource(start_errors=[message.SourceAuthError("bad login")])})
+    with pytest.raises(SystemExit, match=r"^dogs: start failed: bad login$"):
         await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
 
 
-async def test_start_error_exits(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource(start_error=httpx.ConnectError("down"))})
-    with pytest.raises(SystemExit, match="dogs: start failed: down"):
-        await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
-
-
-async def test_start_system_exit_propagates(
+async def test_start_config_error_exits(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource(start_error=SystemExit("fi: collars not found"))})
-    with pytest.raises(SystemExit, match=r"^fi: collars not found$"):
+    patch_sources(monkeypatch, {"dogs": FakeSource(start_errors=[message.SourceConfigError("collars not found")])})
+    with pytest.raises(SystemExit, match=r"^dogs: start failed: collars not found$"):
         await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
+
+
+async def test_start_error_retries_while_others_run(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
+) -> None:
+    fakes = {"down": FakeSource(start_errors=[httpx.ConnectError("down")] * 3), "up": FakeSource()}
+    patch_sources(monkeypatch, fakes)
+    await loop.run(make_settings(tmp_path, {"down": 60, "up": 60}), wait=VirtualClock(2, 600))
+
+    assert (fakes["down"].polls, fakes["up"].polls) == (7, 10)
+    assert "down start failed: down" in caplog.text
 
 
 async def test_source_error_keeps_running(

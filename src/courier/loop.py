@@ -86,15 +86,31 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
     return sent
 
 
+def _save(cfg: settings.Settings, states: States, now: datetime.datetime) -> None:
+    state_store.prune(states, now.date())
+
+    try:
+        state_store.save_state(cfg.state_file, states)
+    except OSError as exc:  # keep running on in-memory state rather than crash-loop
+        log.error("cannot write state file %s: %s", cfg.state_file, exc)
+
+
+class _StartError(Exception):
+    """A source cannot start: its credentials or configuration are wrong."""
+
+
 async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
     """Runs every source's poll loop until SIGTERM or SIGINT.
+
+    Each source starts in its own task. A source that cannot reach its upstream retries
+    every poll interval while the others run.
 
     Args:
         cfg: Service settings.
         wait: Waits for `stop` or the timeout; injectable for tests.
 
     Raises:
-        SystemExit: A source failed to start, or a source's credentials were rejected.
+        SystemExit: A source's credentials or configuration were rejected at start.
     """
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -107,23 +123,29 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
     server = await health.serve_health(monitor, cfg.health_port)
 
     async def poll_forever(name: str, source: message.Source, http: httpx.AsyncClient) -> None:
+        started = False
+
         while not stop.is_set():
             now = datetime.datetime.now(cfg.timezone)
             try:
+                if not started:
+                    await source.start()
+                    started = True
                 alerts = await source.poll(now)
-            except message.SourceAuthError:
-                raise  # exit so restarts back off; retrying every poll risks account lockout
+            except (message.SourceAuthError, message.SourceConfigError) as exc:
+                if not started:
+                    raise _StartError(f"{name}: start failed: {exc}") from exc
+
+                # stop only this source; retrying every poll risks account lockout
+                log.error("%s credentials rejected, polling stopped until restart: %s", name, exc)
+                metrics.POLLS.labels(name, "error").inc()
+                return
             except (message.SourceError, httpx.HTTPError, ValueError) as exc:
-                log.error("%s poll failed: %s", name, exc)
+                log.error("%s %s failed: %s", name, "poll" if started else "start", exc)
                 metrics.POLLS.labels(name, "error").inc()
             else:
                 if await deliver(name, alerts, cfg.targets, http, states, now):
-                    state_store.prune(states, now.date())
-
-                    try:
-                        state_store.save_state(cfg.state_file, states)
-                    except OSError as exc:  # keep running on in-memory state rather than crash-loop
-                        log.error("cannot write state file %s: %s", cfg.state_file, exc)
+                    _save(cfg, states, now)
 
                 monitor.mark_ok(name)
                 metrics.POLLS.labels(name, "ok").inc()
@@ -132,23 +154,23 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
             await wait(stop, intervals[name])
 
     try:
-        async with httpx.AsyncClient(timeout=30) as http:
-            built = {name: sources.build_source(name, src, http, cfg.timezone) for name, src in cfg.sources.items()}
+        async with contextlib.AsyncExitStack() as stack:
+            notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
 
-            for name, source in built.items():
-                try:
-                    await source.start()
-                except message.SourceAuthError as exc:
-                    raise SystemExit(f"auth failed: {exc}") from None
-                except (message.SourceError, httpx.HTTPError, ValueError) as exc:
-                    raise SystemExit(f"{name}: start failed: {exc}") from None
+            # a client per source, so login sessions (cookies) never mix between sources
+            built = {
+                name: sources.build_source(
+                    name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
+                )
+                for name, src in cfg.sources.items()
+            }
 
             try:
                 async with asyncio.TaskGroup() as tg:
                     for name, source in built.items():
-                        tg.create_task(poll_forever(name, source, http))
-            except* message.SourceAuthError as eg:
-                raise SystemExit(f"auth failed: {eg.exceptions[0]}") from None
+                        tg.create_task(poll_forever(name, source, notify_http))
+            except* _StartError as eg:
+                raise SystemExit(str(eg.exceptions[0])) from None
     finally:
         server.close()
         await server.wait_closed()

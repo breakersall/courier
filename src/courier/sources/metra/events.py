@@ -51,7 +51,9 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     today: datetime.date,
     tz: ZoneInfo,
 ) -> message.Message | None:
-    """Builds a delay message when today's trip is late enough.
+    """Builds a delay message when today's trip is late enough at its next stop.
+
+    The next stop is the first update that is not skipped, has a time, and is in the schedule.
 
     Args:
         tu: The trip update.
@@ -69,32 +71,31 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     if start is None or start != today:
         return None
 
-    delays = [
-        stu.arrival.time - gtfs.scheduled_at(start, secs).timestamp()
-        for stu in tu.stop_time_update
-        if stu.arrival.time and (secs := schedule.arrivals.get((tu.trip.trip_id, stu.stop_sequence))) is not None
-    ]
-    if not delays:
+    # the next stop, not the worst one: a train can make up time it lost earlier
+    nxt = next(
+        (
+            s
+            for s in tu.stop_time_update
+            if s.schedule_relationship != SKIPPED
+            and (s.arrival.time or s.departure.time)
+            and (tu.trip.trip_id, s.stop_sequence) in schedule.arrivals
+        ),
+        None,
+    )
+    if nxt is None:
         return None
 
-    minutes = int(max(delays) // 60)
+    expected = nxt.arrival.time or nxt.departure.time
+    scheduled = gtfs.scheduled_at(start, schedule.arrivals[(tu.trip.trip_id, nxt.stop_sequence)])
+    minutes = int((expected - scheduled.timestamp()) // 60)
     if minutes < event.minutes:
         return None
 
-    nxt = next(
-        (s for s in tu.stop_time_update if s.schedule_relationship != SKIPPED and (s.arrival.time or s.departure.time)),
-        None,
-    )
-    # Every stop is skipped or untimed (delay came from earlier stops): name the first update, no time.
-    stop = nxt or tu.stop_time_update[0]
-    body = f"Next stop {schedule.stop_names.get(stop.stop_id, stop.stop_id)}"
-    if nxt is not None:
-        body += f", expected {datetime.datetime.fromtimestamp(nxt.arrival.time or nxt.departure.time, tz):%H:%M}"
-    body += "."
+    stop_name = schedule.stop_names.get(nxt.stop_id, nxt.stop_id)
 
     return message.Message(
         title=f"{line} {number}: {minutes} min late",
-        body=body,
+        body=f"Next stop {stop_name}, expected {datetime.datetime.fromtimestamp(expected, tz):%H:%M}.",
         priority="default",
         tags="train",
         sid=f"metra-{line}-{number}-{tu.trip.start_date}-delay",
