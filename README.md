@@ -68,6 +68,8 @@ With the default `max_per_window` of 1, a delay that grows sends no new notifica
 
 An event sends a notification when it starts matching. While it keeps matching, `max_per_window` (default 1) limits the notifications per window, and the budget resets each day. When a successful poll no longer matches the event, the budget resets, so the next match notifies right away. A failed poll does not reset it.
 
+Budgets are kept in memory, so a restart resets them and every event that is still matching notifies again on the first poll. Set `state_file` to keep them across restarts.
+
 The service sends nothing outside a target's `window`. An event that is still matching when the window opens is sent then. Add `days` to limit the window to certain weekdays, for example `{ start: "08:00", end: "20:00", days: [mon, tue, wed, thu, fri] }`.
 
 With `max_per_window: N`, each send splits the *remaining* window evenly between the remaining sends. For a 08:00–20:00 window and `N = 2`:
@@ -80,6 +82,8 @@ With `max_per_window: N`, each send splits the *remaining* window evenly between
 
 ## Deployment
 
+Run one instance, and stop the old one before starting a new one. Two running instances send every notification twice.
+
 ### Docker
 
 CI publishes the image to `ghcr.io/edepree/courier`, tagged with the version and `latest`. It runs as user `10001` and reads `/config/config.yaml` by default.
@@ -91,15 +95,6 @@ docker run -v $PWD/config.yaml:/config/config.yaml:ro -p 8080:8080 ghcr.io/edepr
 To release, run `uv version X.Y.Z` and push to `main`. CI runs the checks, publishes the image, and creates the `vX.Y.Z` GitHub release. If a release fails, re-run the job or push a fix to `main`.
 
 To build the image locally, run `just docker-build`.
-
-### Kubernetes
-
-There are no manifests in this repository. To run courier on Kubernetes:
-
-- Run one replica, with the `Recreate` strategy. A second replica sends every notification twice.
-- Put `state_file` on a PersistentVolumeClaim, so the rate-limit budgets survive a restart.
-- Mount the config at `/config/config.yaml`, and the secrets as files (`password_file:`, `token_file:`).
-- Use `/healthz` for the liveness probe. See [Health Check](#health-check).
 
 ### Logging
 
