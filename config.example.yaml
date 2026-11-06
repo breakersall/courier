@@ -1,0 +1,46 @@
+poll_interval: 300             # Seconds, >= 60. Default for sources without their own
+timezone: America/Chicago     # IANA name used for windows and "last seen"
+state_file: /data/state.json   # Optional, keeps rate-limit budget across restarts
+health_port: 8080              # Optional
+
+targets:
+  phone:
+    type: ntfy
+    url: https://ntfy.example.com/alerts
+    token_file: /run/secrets/courier/ntfy-token     # Or token:, or username + password(_file)
+    window: { start: "08:00", end: "20:00" }         # Optional, omit for all day
+    # window: { start: "08:00", end: "20:00", days: [mon, tue, wed, thu, fri] }   # Optional days, omit for every day
+
+sources:
+  dogs:
+    type: fi
+    email: me@example.com
+    password_file: /run/secrets/courier/fi-password   # Or `password:` inline
+    collars:
+      - name: Rex                  # Pet name as shown in the Fi app
+        events:
+          - type: battery_low
+            threshold: 40
+            suppress_when_charging: true
+            target: phone
+            max_per_window: 2      # Optional, omit to send on every matching poll
+          - type: collar_offline
+            minutes: 60
+            target: phone
+          - type: lost_mode
+            target: phone
+
+  commute:
+    type: metra
+    token_file: /run/secrets/courier/metra-token      # Or `token:` inline
+    poll_interval: 120             # Optional, default 120
+    trains:
+      - line: BNSF                 # Metra line id
+        number: "1254"             # Train number, as a string
+        events:
+          - { type: train_delayed, minutes: 5, target: phone, max_per_window: 2 }   # minutes defaults to 5; no default cap
+          - { type: train_cancelled, target: phone }             # max_per_window defaults to 1
+    lines:
+      - id: BNSF
+        events:
+          - { type: service_alert, target: phone }               # max_per_window defaults to 1

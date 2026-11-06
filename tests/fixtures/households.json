@@ -1,0 +1,56 @@
+{
+  "data": {
+    "currentUser": {
+      "userHouseholds": [
+        {
+          "household": {
+            "pets": [
+              {
+                "__typename": "Pet",
+                "id": "pet-rex",
+                "name": "Rex",
+                "device": {
+                  "__typename": "Device",
+                  "id": "dev-rex",
+                  "moduleId": "mod-rex",
+                  "info": {"buildId": "4.16.61-prod", "batteryPercent": 37, "bq27421Info": {"batteryPercent": 37}},
+                  "nextLocationUpdateExpectedBy": "2026-10-09T14:09:00.000Z",
+                  "operationParams": {"__typename": "OperationParams", "mode": "NORMAL", "ledEnabled": true, "ledOffAt": null},
+                  "lastConnectionState": {"__typename": "ConnectedToBase", "date": "2026-10-09T14:02:00.000Z", "chargingBase": {"id": "base-1"}}
+                }
+              },
+              {
+                "__typename": "Pet",
+                "id": "pet-bella",
+                "name": "Bella",
+                "device": {
+                  "__typename": "Device",
+                  "id": "dev-bella",
+                  "moduleId": "mod-bella",
+                  "info": {"buildId": "2.1.0-prod", "batteryPercent": 80, "isCharging": false},
+                  "nextLocationUpdateExpectedBy": "2026-10-09T14:09:00.000Z",
+                  "operationParams": {"__typename": "OperationParams", "mode": "LOST_DOG", "ledEnabled": true, "ledOffAt": null},
+                  "lastConnectionState": {"__typename": "ConnectedToCellular", "date": "2026-10-09T13:00:00.000Z", "signalStrengthPercent": 60}
+                }
+              },
+              {"__typename": "Pet", "id": "pet-none", "name": "NoCollar", "device": null},
+              {
+                "__typename": "Pet",
+                "id": "pet-broken",
+                "name": "Broken",
+                "device": {
+                  "__typename": "Device",
+                  "id": "dev-broken",
+                  "moduleId": "mod-broken",
+                  "info": {"buildId": "5.3.17-prod"},
+                  "operationParams": {"__typename": "OperationParams", "mode": "NORMAL"},
+                  "lastConnectionState": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

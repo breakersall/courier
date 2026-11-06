@@ -1,0 +1,46 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+- What courier does, config, deployment: README.md
+- Tasks: `justfile` (`just check` = what CI runs); lint rules: `pyproject.toml`
+- Single test: `uv run pytest tests/test_loop.py::test_name`
+
+## Architecture
+
+- `loop.run`: loads limiter state, builds sources (`sources.build_source`), calls `start()` on each, runs one `poll_forever` task per source in a `TaskGroup`. Shared: one `httpx.AsyncClient`, the `states` dict, the health monitor.
+- Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Alert]`).
+- Delivery: `loop.deliver` → `limiter.allowed` → `targets/ntfy.py` → `limiter.record`. State key `(source_name, alert.key)`, persisted by `state.py`.
+- `alert.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
+- Source package layout (`sources/fi`, `sources/metra`):
+  - `settings.py`: pydantic models, events are a discriminated union on `type`
+  - `client.py`: upstream HTTP and parsing
+  - `events.py`: pure evaluators, status + event → `Message | None`
+  - `__init__.py`: the `*Source` class
+- Metrics: shared ones (`source`/`target` label) in `metrics.py`; ones only one source or target produces in that package's `client.py`, on `metrics.REGISTRY`.
+- New source: add to `SourceConfig` and the `match` in `sources/__init__.py`.
+- Shared config bases (`EventBase`, `Window`, `_file` secrets): `models.py`. Root settings: `settings.py`.
+- Errors:
+  - `SourceAuthError` → process exits (restart backoff avoids account lockout)
+  - `SourceError`, `httpx.HTTPError`, `ValueError` in `start()` → process exits (caught in `loop.run`, not in sources)
+  - `SourceError`, `httpx.HTTPError`, `ValueError` in a poll → logged, poll skipped
+  - failed send → logged, remaining alerts still sent
+
+## Code style
+
+- Google Python Style Guide, Google docstrings.
+- Import modules, not names (`from courier import limiter` → `limiter.allowed`). No relative imports.
+- Blank line between logical steps of a function body (setup, guards, main work, return). No dense blocks.
+- Tests: pytest + pytest-asyncio; upstream fixtures in `tests/fixtures/`.
+
+## Documentation and comments
+
+- Human-facing docs (README.md):
+  - concise technical English for engineers: plain words, full sentences, no over-explaining
+  - title case for headers, table column headers, link titles
+  - overviews (Quick Start, intros) give the one common way; alternatives and details go in their own section, linked
+- Agent-facing docs (this file): lists, short, accurate, no prose.
+- Describe current state only:
+  - no change history ("now", "no longer", "was", "new")
+  - no opinions or asides ("mind the", "useful", "nice")
+- State each fact once, in its canonical place; link to it elsewhere. Config keys and defaults → `settings.py` models; user behaviour → README.md; tasks → `justfile`.
