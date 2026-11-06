@@ -1,6 +1,8 @@
-import asyncio
 from collections.abc import AsyncGenerator
 import contextlib
+
+import httpx
+import prometheus_client
 
 from courier import health
 
@@ -36,37 +38,25 @@ def test_mark_ok_recovers() -> None:
     assert monitor.stale() == []
 
 
-async def get(port: int, path: str) -> bytes:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
-    await writer.drain()
-    data = await reader.read()
-    writer.close()
-
-    return data
-
-
 @contextlib.asynccontextmanager
-async def serving(monitor: health.Health) -> AsyncGenerator[int]:
-    server = await health.serve_health(monitor, 0, host="127.0.0.1")
-
-    try:
-        yield server.sockets[0].getsockname()[1]
-    finally:
-        server.close()
-        await server.wait_closed()
+async def client(monitor: health.Health) -> AsyncGenerator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=health.app(monitor)), base_url="http://t"
+    ) as http_client:
+        yield http_client
 
 
 async def test_http_200_503_404() -> None:
     clock = Clock()
 
-    async with serving(health.Health({"fi": 60}, clock)) as port:
-        assert (await get(port, "/healthz")).startswith(b"HTTP/1.1 200 OK")
+    async with client(health.Health({"fi": 60}, clock)) as http_client:
+        assert (await http_client.get("/healthz")).status_code == 200
 
         clock.now += 1000
-        assert (await get(port, "/readyz")).startswith(b"HTTP/1.1 503 Service Unavailable")
-        assert (await get(port, "/healthz")).startswith(b"HTTP/1.1 200 OK")
-        assert (await get(port, "/x")).startswith(b"HTTP/1.1 404 Not Found")
+        response = await http_client.get("/readyz")
+        assert (response.status_code, response.text) == (503, "503 Service Unavailable: fi")
+        assert (await http_client.get("/healthz")).text == "200 OK"
+        assert (await http_client.get("/x")).status_code == 404
 
 
 async def test_one_stale_source_is_unhealthy() -> None:
@@ -77,15 +67,16 @@ async def test_one_stale_source_is_unhealthy() -> None:
     monitor.mark_ok("fi")
     assert monitor.stale() == ["commute"]
 
-    async with serving(monitor) as port:
-        data = await get(port, "/readyz")
-        assert data.startswith(b"HTTP/1.1 503")
-        assert b"commute" in data.split(b"\r\n\r\n", 1)[1]
+    async with client(monitor) as http_client:
+        response = await http_client.get("/readyz")
+        assert response.status_code == 503
+        assert response.text.endswith("commute")
 
 
 async def test_metrics_endpoint() -> None:
-    async with serving(health.Health({"fi": 60}, Clock())) as port:
-        data = await get(port, "/metrics")
-        assert data.startswith(b"HTTP/1.1 200 OK")
-        assert b"# TYPE courier_polls_total counter" in data
-        assert b"python_gc" not in data
+    async with client(health.Health({"fi": 60}, Clock())) as http_client:
+        response = await http_client.get("/metrics")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == prometheus_client.CONTENT_TYPE_LATEST
+        assert "# TYPE courier_polls_total counter" in response.text
+        assert "python_gc" not in response.text

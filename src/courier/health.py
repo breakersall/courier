@@ -1,11 +1,13 @@
-"""Minimal /healthz, /readyz, and /metrics endpoints on stdlib asyncio."""
+"""Health tracking and the /healthz, /readyz, and /metrics endpoints."""
 
-import asyncio
 from collections.abc import Callable
-import contextlib
 import time
 
 import prometheus_client
+from starlette import applications
+from starlette import requests
+from starlette import responses
+from starlette import routing
 
 from courier import metrics
 
@@ -33,57 +35,37 @@ class Health:
         return sorted(name for name, limit in self._limits.items() if now - self._last_ok[name] > limit)
 
 
-async def serve_health(
-    health: Health,
-    port: int,
-    host: str = "0.0.0.0",  # noqa: S104 - must be reachable by Kubernetes probes
-) -> asyncio.Server:
-    """Starts the HTTP server for /healthz, /readyz, and /metrics.
+def app(health: Health) -> applications.Starlette:
+    """Builds the app serving /healthz, /readyz, and /metrics.
 
     /healthz returns 200 while the event loop serves requests. /readyz returns 200, or 503
     naming the stale sources. /metrics returns Prometheus metrics. Any other path returns 404.
 
     Args:
         health: Health tracker to report.
-        port: TCP port; 0 picks a free one.
-        host: Interface to bind.
 
     Returns:
-        The running server; the caller closes it.
+        The ASGI app.
     """
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            parts = (await asyncio.wait_for(reader.readline(), 5)).split()
-            path = parts[1] if len(parts) >= 2 else b""
-            stale = health.stale()
-            content_type = "text/plain"
+    async def healthz(request: requests.Request) -> responses.Response:
+        return responses.PlainTextResponse("200 OK")
 
-            if path == b"/metrics":
-                status = "200 OK"
-                body = metrics.render()
-                content_type = prometheus_client.CONTENT_TYPE_LATEST
-            elif path not in {b"/healthz", b"/readyz"}:
-                status = "404 Not Found"
-                body = status.encode()
-            elif path == b"/healthz" or not stale:
-                status = "200 OK"
-                body = status.encode()
-            else:
-                status = "503 Service Unavailable"
-                body = f"{status}: {', '.join(stale)}".encode()
+    async def readyz(request: requests.Request) -> responses.Response:
+        stale = health.stale()
 
-            writer.write(
-                f"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n"
-                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
-                + body
-            )
-            await writer.drain()
-        except TimeoutError, ConnectionError, ValueError:  # ValueError: request line over the stream limit
-            pass
-        finally:
-            writer.close()
-            with contextlib.suppress(ConnectionError):
-                await writer.wait_closed()
+        if not stale:
+            return responses.PlainTextResponse("200 OK")
 
-    return await asyncio.start_server(handle, host, port)
+        return responses.PlainTextResponse(f"503 Service Unavailable: {', '.join(stale)}", status_code=503)
+
+    async def prometheus_metrics(request: requests.Request) -> responses.Response:
+        return responses.Response(metrics.render(), media_type=prometheus_client.CONTENT_TYPE_LATEST)
+
+    return applications.Starlette(
+        routes=[
+            routing.Route("/healthz", healthz),
+            routing.Route("/readyz", readyz),
+            routing.Route("/metrics", prometheus_metrics),
+        ]
+    )

@@ -3,6 +3,7 @@ import datetime
 import functools
 import json
 import pathlib
+import socket
 from typing import Any
 import zoneinfo
 
@@ -274,6 +275,21 @@ async def test_start_config_error_exits(
     patch_sources(monkeypatch, {"dogs": FakeSource(start_errors=[message.SourceConfigError("collars not found")])})
     with pytest.raises(SystemExit, match=r"^dogs: start failed: collars not found$"):
         await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
+
+
+async def test_health_port_in_use_exits(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
+) -> None:
+    patch_sources(monkeypatch, {"dogs": FakeSource()})
+
+    with socket.socket() as occupied:
+        occupied.bind(("0.0.0.0", 0))  # noqa: S104 - same interface the health server binds
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        cfg = make_settings(tmp_path).model_copy(update={"health_port": port})
+
+        with pytest.raises(SystemExit, match=rf"^cannot serve on port {port}"):
+            await loop.run(cfg, wait=VirtualClock(1, 600))
 
 
 async def test_start_error_retries_while_others_run(

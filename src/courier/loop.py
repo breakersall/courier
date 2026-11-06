@@ -17,6 +17,7 @@ from courier import metrics
 from courier import settings
 from courier import sources
 from courier import state as state_store
+from courier import web
 from courier.targets import ntfy
 
 log = logging.getLogger("courier")
@@ -127,7 +128,6 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
     states = state_store.load_state(cfg.state_file, datetime.datetime.now(cfg.timezone).date())
     intervals = {name: src.poll_interval or cfg.poll_interval for name, src in cfg.sources.items()}
     monitor = health.Health(intervals)
-    server = await health.serve_health(monitor, cfg.health_port)
 
     async def poll_forever(name: str, source: message.Source, http: httpx.AsyncClient) -> None:
         started = False
@@ -160,25 +160,24 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
 
             await wait(stop, intervals[name])
 
-    try:
-        async with contextlib.AsyncExitStack() as stack:
-            notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
+    async with contextlib.AsyncExitStack() as stack:
+        notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
 
-            # a client per source, so login sessions (cookies) never mix between sources
-            built = {
-                name: sources.build_source(
-                    name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
-                )
-                for name, src in cfg.sources.items()
-            }
+        # a client per source, so login sessions (cookies) never mix between sources
+        built = {
+            name: sources.build_source(
+                name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
+            )
+            for name, src in cfg.sources.items()
+        }
 
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    for name, source in built.items():
-                        tg.create_task(poll_forever(name, source, notify_http))
-            except* _StartError as eg:
-                raise SystemExit(str(eg.exceptions[0])) from None
-    finally:
-        server.close()
-        await server.wait_closed()
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                # must be reachable by Kubernetes probes
+                task_group.create_task(web.serve(health.app(monitor), "0.0.0.0", cfg.health_port, stop))  # noqa: S104
+                for name, source in built.items():
+                    task_group.create_task(poll_forever(name, source, notify_http))
+        except* (_StartError, web.ServeError) as errors:
+            raise SystemExit(str(errors.exceptions[0])) from None
+
     log.info("stopped")
