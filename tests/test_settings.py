@@ -30,7 +30,7 @@ sources:
     token: t
     trains:
       - line: UP-N
-        number: "310"
+        number: 310
         events: [{type: train_delayed, target: phone}]
 """
 
@@ -63,7 +63,7 @@ def test_env_deep_merges_nested(tmp_path: pathlib.Path, monkeypatch: pytest.Monk
     commute = cfg.sources["commute"]
     assert isinstance(commute, metra_settings.MetraSettings)
     assert commute.token.get_secret_value() == "from-env"
-    assert commute.trains[0].number == "310"
+    assert commute.trains[0].number == 310
 
 
 def test_unknown_source_type_rejected(tmp_path: pathlib.Path) -> None:

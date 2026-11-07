@@ -9,31 +9,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-- `loop.run`: loads limiter state, builds sources (`sources.build_source`), runs one `poll_forever` task per source in a `TaskGroup`; each task calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
-- Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Alert]`).
-- Delivery: `loop.deliver` → `limiter.allowed` → `targets/ntfy.py` → `limiter.record`. State key `(source_name, alert.key)`, persisted by `state.py`.
-- `loop.deliver` runs only after a successful poll; it deletes state for that source's keys missing from the poll, so a cleared event's next match starts a fresh budget.
-- `alert.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
+- `loop.run`: `uvicorn.run` owns the process (SIGTERM/SIGINT, port bind; bind failure exits). It serves `loop.app`: `health.app` (`/healthz`, `/readyz`, `/metrics`) on `health_port`, whose lifespan (`loop._run_sources`) loads limiter state, builds sources (`sources.build_source`) and runs one `poll_forever` task per source; each calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
+- Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Check]`): a `Check` per configured event, matched or not, each with a one-line `reason`.
+- Delivery: `loop.deliver` → `limiter.blocked` → `targets/ntfy.py` → `limiter.record`; logs every decision with its reason (held and unmatched at DEBUG). State key `(source_name, check.key)`, persisted by `state.py`.
+- `loop.deliver` runs only after a successful poll; it deletes state for that source's keys that did not match, so a cleared event's next match starts a fresh budget.
+- `check.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
 - Source package layout (`sources/fi`, `sources/metra`):
   - `settings.py`: pydantic models, events are a discriminated union on `type`
   - `client.py`: upstream HTTP and parsing
-  - `events.py`: pure evaluators, status + event → `Message | None`
+  - `events.py`: pure evaluators, status + event → `(Message | None, reason)`
   - `__init__.py`: the `*Source` class
 - Metrics: shared ones (`source`/`target` label) in `metrics.py`; ones only one source or target produces in that package's `client.py`, on `metrics.REGISTRY`.
 - New source: add to `SourceConfig` and the `match` in `sources/__init__.py`.
 - Shared config bases (`EventBase`, `Window`, `_file` secrets): `models.py`. Root settings: `settings.py`.
-- Errors (caught in `loop.run`, never in sources; sources never raise `SystemExit`):
-  - `SourceAuthError`, `SourceConfigError` in `start()` → process exits
-  - `SourceAuthError` in a poll → that source stops until restart (avoids account lockout); others keep running
-  - `SourceError`, `httpx.HTTPError`, `ValueError` in `start()` → logged, retried next interval
-  - `SourceError`, `httpx.HTTPError`, `ValueError` in a poll → logged, poll skipped
-  - failed send → logged, remaining alerts still sent
+- Errors (caught in `poll_forever`, never in sources; a source task never raises, so one source never stops another; only an invalid config file or an unbindable `health_port` exits the process):
+  - `SourceAuthError`, `SourceConfigError` in `start()` or a poll → that source stops until restart (avoids account lockout); others keep running
+  - `SourceError`, `httpx.HTTPError`, `ValueError` → logged, retried next interval
+  - any other exception → logged with traceback, retried next interval
+  - failed send → logged (in `deliver`), remaining notifications still sent
 
 ## Code style
 
 - Google Python Style Guide, Google docstrings.
-- Import modules, not names (`from courier import limiter` → `limiter.allowed`). No relative imports.
+- Import modules, not names (`from courier import limiter` → `limiter.blocked`). No relative imports.
 - Blank line between logical steps of a function body (setup, guards, main work, return). No dense blocks.
+- No conditional expressions (`x if c else y`); use an if statement. No generator, `any`/`all` or `next(...)` with a compound condition; use a loop. If ruff objects (PLR0915, PERF401), extract a helper rather than repacking.
+- Descriptive names, no single letters (`train`, not `t`), tests included.
 - Tests: pytest + pytest-asyncio; upstream fixtures in `tests/fixtures/`.
 
 ## Documentation and comments

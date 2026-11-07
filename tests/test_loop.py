@@ -2,7 +2,10 @@ import asyncio
 import datetime
 import functools
 import json
+import os
 import pathlib
+import signal
+import socket
 from typing import Any
 import zoneinfo
 
@@ -58,12 +61,17 @@ def target(window: dict[str, str] | None = None) -> dict[str, ntfy.NtfyTarget]:
     }
 
 
-def alert(limit: int | None = 2, priority: str | None = None, key: str = "Rex:battery_low:phone") -> message.Alert:
+def check(
+    limit: int | None = 2,
+    priority: str | None = None,
+    key: str = "Rex:battery_low:phone",
+    matched: message.Message | None = MSG,
+) -> message.Check:
     raw = {"type": "battery_low", "target": "phone", "priority": priority}
     if limit is not None:
         raw["max_per_window"] = limit
     event = fi_settings.BatteryLow.model_validate(raw)
-    return message.Alert(key, event, MSG)
+    return message.Check(key, event, matched, "battery 37% < threshold 40%")
 
 
 class Ntfy:
@@ -79,37 +87,66 @@ class Ntfy:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
 
 
-async def deliver_at(ntfy_: Ntfy, alerts: list[message.Alert], *times: datetime.datetime, **window: str) -> loop.States:
+async def deliver_at(ntfy_: Ntfy, polled: list[message.Check], *times: datetime.datetime, **window: str) -> loop.States:
     states: loop.States = {}
     async with ntfy_.client() as http:
         for t in times:
-            await loop.deliver("dogs", alerts, target(window or None), http, states, t)
+            await loop.deliver("dogs", polled, target(window or None), http, states, t)
     return states
 
 
 async def test_deliver_respects_limit() -> None:
     ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert()], at(8), at(8, 5), at(14), start="08:00", end="20:00")
+    states = await deliver_at(ntfy_, [check()], at(8), at(8, 5), at(14), start="08:00", end="20:00")
     assert len(ntfy_.requests) == 2
     assert states[("dogs", "Rex:battery_low:phone")].sent == 2
 
 
 async def test_deliver_default_once_per_window() -> None:
     ntfy_ = Ntfy()
-    await deliver_at(ntfy_, [alert(limit=None)], at(8), at(12), at(19))
+    await deliver_at(ntfy_, [check(limit=None)], at(8), at(12), at(19))
     assert len(ntfy_.requests) == 1
 
 
-async def test_deliver_cleared_alert_starts_fresh_budget() -> None:
+async def test_deliver_cleared_check_starts_fresh_budget() -> None:
     ntfy_ = Ntfy()
     states: loop.States = {("other", "Rex:battery_low:phone"): limiter.LimiterState()}
 
     async with ntfy_.client() as http:
-        for alerts in ([alert(limit=1)], [alert(limit=1)], [], [alert(limit=1)]):
-            await loop.deliver("dogs", alerts, target(), http, states, at(9))
+        for polled in ([check(limit=1)], [check(limit=1)], [], [check(limit=1)]):
+            await loop.deliver("dogs", polled, target(), http, states, at(9))
 
     assert len(ntfy_.requests) == 2
     assert ("other", "Rex:battery_low:phone") in states  # other sources' state untouched
+
+
+async def test_deliver_logs_each_decision(caplog: pytest.LogCaptureFixture) -> None:
+    windowed = target({"start": "08:00", "end": "20:00"})
+    states: loop.States = {}
+
+    with caplog.at_level("DEBUG", logger="courier"):
+        async with Ntfy().client() as http:
+            await loop.deliver("dogs", [check(key="low")], windowed, http, states, at(9))
+            await loop.deliver("dogs", [check(key="low")], windowed, http, states, at(10))
+            await loop.deliver("dogs", [check(key="night")], windowed, http, {}, at(21))
+            await loop.deliver("dogs", [check(key="ok", matched=None)], windowed, http, {}, at(9))
+
+    assert caplog.messages == [
+        "dogs/low matched (battery 37% < threshold 40%), sent to phone",
+        "dogs/low matched (battery 37% < threshold 40%), held: next allowed 14:30",
+        "dogs/night matched (battery 37% < threshold 40%), held: outside window 08:00–20:00",  # noqa: RUF001
+        "dogs/ok no match: battery 37% < threshold 40%",
+    ]
+
+
+async def test_deliver_unmatched_check_clears_state() -> None:
+    key = "Rex:battery_low:phone"
+    states: loop.States = {("dogs", key): limiter.LimiterState(window_date=at(9).date(), sent=1)}
+
+    async with Ntfy().client() as http:
+        await loop.deliver("dogs", [check(matched=None)], target(), http, states, at(9))
+
+    assert states == {}
 
 
 def notifications(result: str) -> float:
@@ -123,26 +160,18 @@ def notifications(result: str) -> float:
 
 async def test_deliver_counts_metrics() -> None:
     sent, limited = notifications("sent"), notifications("limited")
-    await deliver_at(Ntfy(), [alert(limit=1)], at(8), at(8, 5), start="08:00", end="20:00")
+    await deliver_at(Ntfy(), [check(limit=1)], at(8), at(8, 5), start="08:00", end="20:00")
 
     assert notifications("sent") - sent == 1
     assert notifications("limited") - limited == 1
-
-
-async def test_deliver_outside_window() -> None:
-    ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert()], at(21), start="08:00", end="20:00")
-    assert ntfy_.requests == []
-    assert states == {}
 
 
 async def test_deliver_failed_send_not_recorded(caplog: pytest.LogCaptureFixture) -> None:
     ntfy_ = Ntfy(status=500)
     async with ntfy_.client() as http:
         states: loop.States = {}
-        sent = await loop.deliver("dogs", [alert()], target(), http, states, at(9))
+        await loop.deliver("dogs", [check()], target(), http, states, at(9))
 
-    assert not sent
     assert len(ntfy_.requests) == 1
     assert states == {}
     assert "HTTP 500" in caplog.text
@@ -150,7 +179,7 @@ async def test_deliver_failed_send_not_recorded(caplog: pytest.LogCaptureFixture
 
 async def test_deliver_priority_override() -> None:
     ntfy_ = Ntfy()
-    await deliver_at(ntfy_, [alert(priority="urgent")], at(9))
+    await deliver_at(ntfy_, [check(priority="urgent")], at(9))
     assert ntfy_.requests[0].url.params["priority"] == "urgent"
 
 
@@ -169,7 +198,7 @@ async def test_deliver_unexpected_failure_does_not_skip_rest(
 
     monkeypatch.setattr(ntfy, "send_ntfy", flaky)
     ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert(key="a"), alert(key="b")], at(9))
+    states = await deliver_at(ntfy_, [check(key="a"), check(key="b")], at(9))
     assert len(ntfy_.requests) == 1
     assert set(states) == {("dogs", "b")}
     assert "boom" in caplog.text
@@ -185,21 +214,25 @@ class FakeSource:
         if self.start_errors:
             raise self.start_errors.pop(0)
 
-    async def poll(self, now: datetime.datetime) -> list[message.Alert]:
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
         self.polls += 1
-        result = self.results.pop(0) if self.results else []
+        if not self.results:
+            return []
+
+        result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
         return result
 
 
 class VirtualClock:
-    """Fake `wait`: each poll task advances its own virtual time; stop is set once every task reaches `until`."""
+    """Stands in for `loop._wait`: each poll task advances its own time; sets `reached` once `tasks` reach `until`."""
 
     def __init__(self, tasks: int, until: float) -> None:
         self.tasks = tasks
         self.until = until
         self.elapsed: dict[asyncio.Task[Any] | None, float] = {}
+        self.reached = asyncio.Event()
 
     async def __call__(self, stop: asyncio.Event, seconds: float) -> None:
         task = asyncio.current_task()
@@ -210,8 +243,19 @@ class VirtualClock:
             return
 
         if sum(t >= self.until for t in self.elapsed.values()) == self.tasks:
-            stop.set()
+            self.reached.set()
         await stop.wait()
+
+
+async def serve_polls(cfg: settings.Settings, clock: VirtualClock) -> None:
+    """Runs the app's lifespan, as uvicorn does, until the clock is reached."""
+    service = loop.app(cfg)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(loop, "_wait", clock)
+
+        async with asyncio.timeout(5), service.router.lifespan_context(service):
+            await clock.reached.wait()
 
 
 @pytest.fixture
@@ -239,7 +283,7 @@ async def test_two_sources_independent_intervals(
 ) -> None:
     fakes = {"fast": FakeSource(), "slow": FakeSource()}
     patch_sources(monkeypatch, fakes)
-    await loop.run(make_settings(tmp_path, {"fast": 60, "slow": 120}), wait=VirtualClock(2, 600))
+    await serve_polls(make_settings(tmp_path, {"fast": 60, "slow": 120}), VirtualClock(2, 600))
     assert (fakes["fast"].polls, fakes["slow"].polls) == (10, 5)
 
 
@@ -247,33 +291,78 @@ async def test_sources_get_separate_http_clients(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
 ) -> None:
     clients = patch_sources(monkeypatch, {"a": FakeSource(), "b": FakeSource()})
-    await loop.run(make_settings(tmp_path, {"a": 60, "b": 60}), wait=VirtualClock(2, 60))
+    await serve_polls(make_settings(tmp_path, {"a": 60, "b": 60}), VirtualClock(2, 60))
     assert clients["a"] is not clients["b"]
 
 
-async def test_poll_auth_error_stops_only_that_source(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("phase", "error", "bad_polls"),
+    [
+        ("start", message.SourceAuthError("bad login"), 0),
+        ("start", message.SourceConfigError("collars not found"), 0),
+        ("poll", message.SourceAuthError("session rejected"), 1),
+        ("poll", message.SourceConfigError("train not found"), 1),
+    ],
+    ids=["start-auth", "start-config", "poll-auth", "poll-config"],
+)
+async def test_rejected_stops_only_that_source(  # noqa: PLR0917 - fixtures plus parameters
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ntfy_mock: Ntfy,
+    caplog: pytest.LogCaptureFixture,
+    phase: str,
+    error: message.SourceError,
+    bad_polls: int,
 ) -> None:
-    fakes = {"bad": FakeSource([message.SourceAuthError("rejected")]), "good": FakeSource()}
+    bad = FakeSource([error])
+    if phase == "start":
+        bad = FakeSource(start_errors=[error])
+
+    fakes = {"bad": bad, "good": FakeSource()}
     patch_sources(monkeypatch, fakes)
-    await loop.run(make_settings(tmp_path, {"bad": 60, "good": 60}), wait=VirtualClock(1, 600))
+    await serve_polls(make_settings(tmp_path, {"bad": 60, "good": 60}), VirtualClock(1, 600))
 
-    assert (fakes["bad"].polls, fakes["good"].polls) == (1, 10)
-    assert "bad credentials rejected" in caplog.text
-
-
-async def test_start_auth_error_exits(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource(start_errors=[message.SourceAuthError("bad login")])})
-    with pytest.raises(SystemExit, match=r"^dogs: start failed: bad login$"):
-        await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
+    assert (fakes["bad"].polls, fakes["good"].polls) == (bad_polls, 10)
+    assert f"bad {phase} failed, polling stopped until restart: {error}" in caplog.text
 
 
-async def test_start_config_error_exits(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
+@pytest.mark.parametrize(
+    ("error", "logged"),
+    [
+        (message.SourceError("upstream down"), ["dogs poll failed: upstream down"]),
+        (httpx.ReadTimeout(""), ["dogs poll failed: ReadTimeout"]),  # some httpx timeouts have no message
+        (RuntimeError("bug"), ["dogs poll crashed", "RuntimeError: bug"]),
+    ],
+    ids=["source-error", "no-message", "unexpected"],
+)
+async def test_poll_error_logged_and_retried(  # noqa: PLR0917 - fixtures plus parameters
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ntfy_mock: Ntfy,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    logged: list[str],
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource(start_errors=[message.SourceConfigError("collars not found")])})
-    with pytest.raises(SystemExit, match=r"^dogs: start failed: collars not found$"):
-        await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 600))
+    patch_sources(monkeypatch, {"dogs": FakeSource([error, [check()]])})
+    await serve_polls(make_settings(tmp_path), VirtualClock(1, 120))
+
+    for line in logged:
+        assert line in caplog.text
+
+    assert len(ntfy_mock.requests) == 1
+
+
+def test_health_port_in_use_exits(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
+    patch_sources(monkeypatch, {"dogs": FakeSource()})
+
+    with socket.socket() as occupied:
+        occupied.bind(("0.0.0.0", 0))  # noqa: S104 - same interface the health server binds
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        cfg = make_settings(tmp_path).model_copy(update={"health_port": port})
+
+        with pytest.raises(SystemExit):
+            loop.run(cfg)
 
 
 async def test_start_error_retries_while_others_run(
@@ -281,48 +370,62 @@ async def test_start_error_retries_while_others_run(
 ) -> None:
     fakes = {"down": FakeSource(start_errors=[httpx.ConnectError("down")] * 3), "up": FakeSource()}
     patch_sources(monkeypatch, fakes)
-    await loop.run(make_settings(tmp_path, {"down": 60, "up": 60}), wait=VirtualClock(2, 600))
+    await serve_polls(make_settings(tmp_path, {"down": 60, "up": 60}), VirtualClock(2, 600))
 
     assert (fakes["down"].polls, fakes["up"].polls) == (7, 10)
     assert "down start failed: down" in caplog.text
 
 
-async def test_source_error_keeps_running(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("second_poll", "sends"),
+    [([], 2), (message.SourceError("down"), 1)],
+    ids=["cleared-notifies-again", "failed-keeps-budget"],
+)
+async def test_only_successful_poll_clears(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ntfy_mock: Ntfy,
+    second_poll: list[message.Check] | Exception,
+    sends: int,
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([message.SourceError("upstream down"), [alert()]])})
-    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 120))
-    assert "upstream down" in caplog.text
-    assert len(ntfy_mock.requests) == 1
-
-
-async def test_failed_poll_does_not_clear(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
-) -> None:
-    results = [[alert(limit=1)], message.SourceError("down"), [alert(limit=1)]]
-    patch_sources(monkeypatch, {"dogs": FakeSource(results)})
-    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
-    assert len(ntfy_mock.requests) == 1
-
-
-async def test_cleared_poll_notifies_again(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
-) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([[alert(limit=1)], [], [alert(limit=1)]])})
-    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
-    assert len(ntfy_mock.requests) == 2
+    patch_sources(monkeypatch, {"dogs": FakeSource([[check(limit=1)], second_poll, [check(limit=1)]])})
+    await serve_polls(make_settings(tmp_path), VirtualClock(1, 180))
+    assert len(ntfy_mock.requests) == sends
 
 
 async def test_state_saved_and_pruned(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([[alert()]])})
+    patch_sources(monkeypatch, {"dogs": FakeSource([[check()]])})
     cfg = make_settings(tmp_path)
 
     old = {json.dumps(["dogs", "old"]): {"window_date": "2020-01-01", "sent": 1, "next_allowed": None}}
     (tmp_path / "state.json").write_text(json.dumps(old))
 
-    await loop.run(cfg, wait=VirtualClock(1, 60))
+    await serve_polls(cfg, VirtualClock(1, 60))
 
     saved = json.loads((tmp_path / "state.json").read_text())
     today = datetime.datetime.now(cfg.timezone).date().isoformat()
     assert list(saved) == [json.dumps(["dogs", "Rex:battery_low:phone"])]
     assert saved[json.dumps(["dogs", "Rex:battery_low:phone"])]["window_date"] == today
+
+
+class SigtermSource(FakeSource):
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await super().poll(now)
+
+
+def test_sigterm_stops_run(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
+    patch_sources(monkeypatch, {"dogs": SigtermSource()})
+    received = []
+
+    def record(signum: int, frame: object) -> None:
+        received.append(signum)
+
+    # uvicorn raises the signal again once it has shut down; record it instead of ending pytest
+    previous = signal.signal(signal.SIGTERM, record)
+    try:
+        loop.run(make_settings(tmp_path))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert received == [signal.SIGTERM]

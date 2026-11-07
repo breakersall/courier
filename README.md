@@ -30,6 +30,8 @@ Each entry under `sources` is keyed by a name of your choice and has a `type` (`
 
 Each entry under `targets` is keyed by a name of your choice and is a full ntfy topic URL with its own credentials and `window`. Each event picks one with `target:`, so different sources or events can go to different topics on the same server.
 
+To see why an event did or did not notify, run with `--log-level DEBUG` (see [Logging](#logging)).
+
 ## Sources
 
 ### Fi
@@ -37,7 +39,7 @@ Each entry under `targets` is keyed by a name of your choice and is a full ntfy 
 > [!NOTE]
 > Fi has no public API. This source uses the same API as the Fi app, which can change without notice.
 
-At startup, the source verifies that each configured collar exists on the Fi account. If one does not, it exits and lists the available names.
+At startup, the source verifies that each configured collar exists on the Fi account. If one does not, the source stops and logs the available names.
 
 | Type | Fires When |
 |---|---|
@@ -100,13 +102,23 @@ To build the image locally, run `just docker-build`.
 
 `--log-format json` (or `LOG_FORMAT=json`) writes one JSON object per line. JSON lines have no timestamp, because Docker and Kubernetes add one.
 
+Each sent notification is logged at `INFO` with the reason its event matched. `--log-level DEBUG` (or `LOG_LEVEL=DEBUG`) also logs, on every poll, each event that did not match and each match that the window or rate limit held back, with the reason:
+
+```
+DEBUG courier: dogs/Rex:battery_low:phone no match: battery 52% ≥ threshold 40%
+DEBUG courier: commute/BNSF1254:train_delayed:phone matched (7 min late ≥ 5), held: budget used: 1 of 1 today
+INFO courier: dogs/Rex:lost_mode:phone matched (mode is lost dog), sent to phone
+```
+
 ### Health Check
 
 `GET /healthz` returns `200` while the process is running. Use it as the liveness probe.
 
 `GET /readyz` returns `200` if every source has had a successful poll within the last 3 × its poll interval. Otherwise it returns `503` and names the failing sources.
 
-An upstream outage does not stop the other sources. A source that cannot reach its upstream at startup retries every poll interval. If a source's credentials are rejected at startup, or a configured collar, train, or line does not exist, the process exits. If credentials are rejected later, that source stops until the next restart, so repeated logins cannot lock the account.
+The Docker image uses `/readyz` on port 8080 as its `HEALTHCHECK`, so `docker ps` shows the container as unhealthy while a source is failing.
+
+Each source runs independently, so a failure in one never stops the others. A source that cannot reach its upstream, or hits an unexpected error, logs it and retries every poll interval. If a source's credentials are rejected, or a configured collar, train, or line does not exist, that source stops until the next restart, so repeated logins cannot lock the account; `/readyz` then reports it. The process exits only if the config file is invalid or the health port is in use.
 
 ### Metrics
 

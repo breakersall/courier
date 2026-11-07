@@ -1,7 +1,6 @@
 """Entry point: poll every configured source and deliver notifications."""
 
 import argparse
-import asyncio
 import json
 import logging
 import os
@@ -31,7 +30,7 @@ def main(argv: list[str] | None = None) -> None:
         argv: Command-line arguments; defaults to sys.argv.
 
     Raises:
-        SystemExit: The config is missing or invalid.
+        SystemExit: The config is missing or invalid, or the health port is in use.
     """
     parser = argparse.ArgumentParser(prog="courier", description=__doc__)
     parser.add_argument("--config", type=pathlib.Path, required=True)
@@ -52,7 +51,7 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"invalid config {args.config}: {exc}") from None
 
-    asyncio.run(loop.run(cfg))
+    loop.run(cfg)
 
 
 if __name__ == "__main__":

@@ -66,12 +66,13 @@ async def send_ntfy(client: httpx.AsyncClient, target: NtfyTarget, msg: message.
     Raises:
         NotifyError: The request failed, timed out, or returned a non-2xx status.
     """
-    headers = {"Authorization": f"Bearer {target.token.get_secret_value()}"} if target.token is not None else {}
-    auth = (
-        httpx.BasicAuth(target.username, target.password.get_secret_value())
-        if target.username is not None and target.password is not None
-        else httpx.USE_CLIENT_DEFAULT
-    )
+    headers: dict[str, str] = {}
+    if target.token is not None:
+        headers["Authorization"] = f"Bearer {target.token.get_secret_value()}"
+
+    auth: httpx.BasicAuth | httpx._client.UseClientDefault = httpx.USE_CLIENT_DEFAULT
+    if target.username is not None and target.password is not None:
+        auth = httpx.BasicAuth(target.username, target.password.get_secret_value())
 
     # query params rather than headers so non-ASCII titles survive
     params = {"title": msg.title, "priority": msg.priority, "tags": msg.tags}

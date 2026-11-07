@@ -28,19 +28,25 @@ class Message:
     sid: str = ""
 
 
+type Decision = tuple[Message | None, str]
+"""An evaluator's result: the message if the event matched, else None, and a one-line reason."""
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
-class Alert:
-    """A message plus the event that produced it.
+class Check:
+    """One configured event evaluated against upstream data.
 
     Attributes:
         key: Stable limiter-state id for the event.
-        event: The configured event that matched.
-        message: The notification to send.
+        event: The configured event.
+        message: The notification to send if the event matched, else None.
+        reason: One line explaining the decision, match or not.
     """
 
     key: str
     event: models.EventBase
-    message: Message
+    message: Message | None
+    reason: str
 
 
 class Source(Protocol):
@@ -50,8 +56,8 @@ class Source(Protocol):
         """Validates configuration against the upstream service."""
         ...
 
-    async def poll(self, now: datetime.datetime) -> list[Alert]:
-        """Returns alerts for events matching at `now`."""
+    async def poll(self, now: datetime.datetime) -> list[Check]:
+        """Returns every configured event evaluated at `now`."""
         ...
 
 
@@ -77,7 +83,11 @@ def event_keys(entity: str, events: Sequence[models.EventBase]) -> list[str]:
 
     for event in events:
         base = f"{entity}:{event.type}:{event.target}"
-        keys.append(f"{base}:{seen[base]}" if seen[base] else base)
+        if seen[base]:
+            keys.append(f"{base}:{seen[base]}")
+        else:
+            keys.append(base)
+
         seen[base] += 1
 
     return keys

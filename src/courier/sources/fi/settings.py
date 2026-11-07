@@ -81,8 +81,7 @@ class FiSettings(models.SourceSettings):
 
     @pydantic.model_validator(mode="after")
     def _unique_collars(self) -> Self:
-        names = [c.name for c in self.collars]
-        dupes = sorted({n for n in names if names.count(n) > 1})
+        dupes = models.duplicates([collar.name for collar in self.collars])
         if dupes:
             raise ValueError(f"duplicate collar names: {', '.join(dupes)}")
         return self

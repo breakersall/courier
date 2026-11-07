@@ -57,18 +57,13 @@ def test_window_days() -> None:
     assert window.start == datetime.time(8)
 
 
-def test_window_single_day_string() -> None:
-    window = models.Window.model_validate({"start": "08:00", "end": "20:00", "days": "mon"})
-    assert window.days == {0}
-
-
 def test_window_crossing_midnight_rejected() -> None:
     with pytest.raises(ValueError, match="before end"):
         models.Window.model_validate({"start": "22:00", "end": "06:00"})
 
 
-@pytest.mark.parametrize("days", [[], ["funday"]])
-def test_window_bad_days_rejected(days: list[str]) -> None:
+@pytest.mark.parametrize("days", [[], ["funday"], "mon"])
+def test_window_bad_days_rejected(days: list[str] | str) -> None:
     with pytest.raises(ValueError, match="days"):
         models.Window.model_validate({"start": "08:00", "end": "20:00", "days": days})
 
@@ -76,8 +71,3 @@ def test_window_bad_days_rejected(days: list[str]) -> None:
 def test_event_base_rejects_zero_max_per_window() -> None:
     with pytest.raises(ValueError, match="max_per_window"):
         models.EventBase.model_validate({"target": "phone", "max_per_window": 0})
-
-
-def test_source_settings_events_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        models.SourceSettings().events()

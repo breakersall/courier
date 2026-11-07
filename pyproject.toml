@@ -1,6 +1,6 @@
 [project]
 name = "courier"
-version = "0.1.0"
+version = "0.2.0"
 description = "notifications from pluggable sources"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,6 +9,8 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "pydantic>=2.14.3",
     "pydantic-settings[yaml]>=2.16.2",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]

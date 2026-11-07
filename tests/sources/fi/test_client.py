@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from courier import message
 from courier.sources.fi import client as fi
 
 FIXTURE = json.loads((pathlib.Path(__file__).parents[2] / "fixtures" / "households.json").read_text())
@@ -66,7 +67,7 @@ class FakeFi:
 async def test_login_failure_raises() -> None:
     fake = FakeFi([], login=httpx.Response(200, json={"error": {"message": "bad"}}))
     async with fake.client() as http:
-        with pytest.raises(fi.FiAuthError) as exc:
+        with pytest.raises(message.SourceAuthError) as exc:
             await fi.FiClient("me@example.com", "s3cret", http).login()
     assert "s3cret" not in str(exc.value)
 
@@ -74,7 +75,7 @@ async def test_login_failure_raises() -> None:
 async def test_fetch_sends_csrf_safe_content_type() -> None:
     fake = FakeFi([httpx.Response(200, json=FIXTURE)])
     async with fake.client() as http:
-        pets = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
+        pets, _ = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
 
     assert len(pets) == 2
 
@@ -88,7 +89,7 @@ async def test_fetch_sends_csrf_safe_content_type() -> None:
 async def test_fetch_relogin_on_401() -> None:
     fake = FakeFi([httpx.Response(401), httpx.Response(200, json=FIXTURE)])
     async with fake.client() as http:
-        pets = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
+        pets, _ = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
     assert len(pets) == 2
     assert fake.logins == 2
 
@@ -96,7 +97,7 @@ async def test_fetch_relogin_on_401() -> None:
 async def test_fetch_second_401_raises() -> None:
     fake = FakeFi([httpx.Response(401), httpx.Response(401)])
     async with fake.client() as http:
-        with pytest.raises(fi.FiAuthError):
+        with pytest.raises(message.SourceAuthError):
             await fi.FiClient("me@example.com", "pw", http).fetch_pets()
     assert fake.logins == 2
 
@@ -105,7 +106,7 @@ async def test_fetch_relogin_on_graphql_auth_error() -> None:
     unauth = httpx.Response(200, json={"errors": [{"message": "Unauthorized"}]})
     fake = FakeFi([unauth, httpx.Response(200, json=FIXTURE)])
     async with fake.client() as http:
-        pets = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
+        pets, _ = await fi.FiClient("me@example.com", "pw", http).fetch_pets()
 
     assert len(pets) == 2
     assert fake.logins == 2
@@ -135,8 +136,8 @@ def test_pet_names_include_skipped_pets() -> None:
 
 
 @pytest.mark.parametrize("body", [{}, {"data": None}, {"data": {"currentUser": None}}, ["x"]], ids=str)
-async def test_fetch_bad_shape_raises_fi_error(body: Any) -> None:
+async def test_fetch_bad_shape_raises_source_error(body: Any) -> None:
     fake = FakeFi([httpx.Response(200, json=body)])
     async with fake.client() as http:
-        with pytest.raises(fi.FiError):
+        with pytest.raises(message.SourceError):
             await fi.FiClient("me@example.com", "pw", http).fetch_pets()

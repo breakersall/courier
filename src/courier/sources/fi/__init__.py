@@ -35,8 +35,7 @@ class FiSource:
             SourceConfigError: A configured collar is missing; the message lists available names.
             SourceAuthError: Fi rejected the login.
         """
-        await self._client.fetch_pets()
-        names = self._client.pet_names
+        _, names = await self._client.fetch_pets()
         missing = [c.name for c in self._settings.collars if c.name not in names]
 
         if missing:
@@ -45,20 +44,23 @@ class FiSource:
                 f"collars not found on Fi account: {', '.join(missing)}; available: {available}"
             )
 
-    async def poll(self, now: datetime.datetime) -> list[message.Alert]:
-        """Returns one alert per collar event that matches at `now`."""
-        pets = {p.name: p for p in await self._client.fetch_pets()}
-        alerts = []
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
+        """Returns each configured collar event evaluated at `now`."""
+        fetched, _ = await self._client.fetch_pets()
+        pets = {pet.name: pet for pet in fetched}
+        checks = []
 
         for collar in self._settings.collars:
             pet = pets.get(collar.name)
             if pet is None:
                 log.warning("collar %r missing from Fi response", collar.name)
-                continue
 
             for key, event in zip(message.event_keys(collar.name, collar.events), collar.events, strict=True):
-                msg = events.evaluate(pet, event, now, self._tz)
-                if msg is not None:
-                    alerts.append(message.Alert(key, event, msg))
+                if pet is None:
+                    checks.append(message.Check(key, event, None, "missing from Fi response"))
+                    continue
 
-        return alerts
+                matched, reason = events.evaluate(pet, event, now, self._tz)
+                checks.append(message.Check(key, event, matched, reason))
+
+        return checks

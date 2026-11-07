@@ -40,13 +40,6 @@ def test_load_drops_entries_before_today(tmp_path: pathlib.Path) -> None:
     assert state_store.load_state(path, TODAY) == {("Rex", "b"): S}
 
 
-def test_load_keeps_dynamic_keys(tmp_path: pathlib.Path) -> None:
-    path = tmp_path / "state.json"
-    state = {("commute", "BNSF:service_alert:phone:DevAPI-X"): S}
-    state_store.save_state(path, state)
-    assert state_store.load_state(path, TODAY) == state
-
-
 def test_atomic_write_no_tmp_left(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "state.json"
     state_store.save_state(path, {("Rex", "battery_low:phone"): S})

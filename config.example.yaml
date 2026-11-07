@@ -1,46 +1,53 @@
-poll_interval: 300             # Seconds, >= 60. Default for sources without their own
-timezone: America/Chicago     # IANA name used for windows and "last seen"
-state_file: /data/state.json   # Optional, keeps rate-limit budget across restarts
-health_port: 8080              # Optional
+poll_interval: 300                                   # seconds, >= 60; default for sources without their own
+timezone: America/Chicago                            # IANA name for windows and times in messages
+state_file: /data/state.json                         # optional; keeps rate-limit budgets across restarts
+health_port: 8080                                    # optional, default 8080; the Docker HEALTHCHECK assumes 8080
 
 targets:
   phone:
     type: ntfy
     url: https://ntfy.example.com/alerts
-    token_file: /run/secrets/courier/ntfy-token     # Or token:, or username + password(_file)
-    window: { start: "08:00", end: "20:00" }         # Optional, omit for all day
-    # window: { start: "08:00", end: "20:00", days: [mon, tue, wed, thu, fri] }   # Optional days, omit for every day
+    token_file: /run/secrets/courier/ntfy-token      # or `token:`, or `username:` + `password(_file):`
+    window:                                          # optional, omit for all day
+      start: "08:00"
+      end: "20:00"
+      days: [mon, tue, wed, thu, fri]                # optional, omit for every day
 
 sources:
   dogs:
     type: fi
     email: me@example.com
-    password_file: /run/secrets/courier/fi-password   # Or `password:` inline
+    password_file: /run/secrets/courier/fi-password  # or `password:` inline
     collars:
-      - name: Rex                  # Pet name as shown in the Fi app
+      - name: Rex                                    # pet name as shown in the Fi app
         events:
           - type: battery_low
-            threshold: 40
-            suppress_when_charging: true
+            threshold: 40                            # percent, optional, default 40
+            suppress_when_charging: true             # optional, default false
             target: phone
-            max_per_window: 2      # Optional, default 1 per window while it keeps matching
+            max_per_window: 2                        # optional, default 1 per window while it keeps matching
           - type: collar_offline
-            minutes: 60
+            minutes: 60                              # optional, default 60
             target: phone
           - type: lost_mode
             target: phone
 
   commute:
     type: metra
-    token_file: /run/secrets/courier/metra-token      # Or `token:` inline
-    poll_interval: 120             # Optional, default 120
+    token_file: /run/secrets/courier/metra-token     # or `token:` inline
+    poll_interval: 120                               # optional, default 120
     trains:
-      - line: BNSF                 # Metra line id
-        number: "1254"             # Train number, as a string
+      - line: BNSF                                   # Metra line id
+        number: 1254                                 # train number
         events:
-          - { type: train_delayed, minutes: 5, target: phone, max_per_window: 2 }   # minutes defaults to 5
-          - { type: train_cancelled, target: phone }
+          - type: train_delayed
+            minutes: 5                               # optional, default 5
+            target: phone
+            max_per_window: 2
+          - type: train_cancelled
+            target: phone
     lines:
-      - id: BNSF
+      - id: BNSF                                     # Metra line id
         events:
-          - { type: service_alert, target: phone }
+          - type: service_alert
+            target: phone

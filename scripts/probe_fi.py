@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from courier import message
 from courier.sources.fi import client as fi
 
 QUERY = """query { currentUser { userHouseholds { household { pets {
@@ -68,7 +69,7 @@ async def probe(email: str, password: str) -> None:
     async with httpx.AsyncClient(timeout=30) as http:
         try:
             await fi.FiClient(email, password, http).login()
-        except fi.FiAuthError as exc:
+        except message.SourceAuthError as exc:
             sys.exit(str(exc))  # No retry to avoid account lockout
 
         resp = await http.get(f"{fi.BASE_URL}/graphql", params={"query": QUERY}, headers=fi.GRAPHQL_HEADERS)
@@ -78,7 +79,10 @@ async def probe(email: str, password: str) -> None:
 
 def main() -> None:
     """Reads the credentials file and runs the probe."""
-    path = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "~/.config/courier/fi-creds")
+    path = pathlib.Path("~/.config/courier/fi-creds")
+    if len(sys.argv) > 1:
+        path = pathlib.Path(sys.argv[1])
+
     email, password = path.expanduser().read_text().splitlines()[:2]
 
     asyncio.run(probe(email, password))

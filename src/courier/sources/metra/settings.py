@@ -48,12 +48,12 @@ class Train(models.Model):
 
     Attributes:
         line: Metra line id, e.g. "UP-N".
-        number: Train number, e.g. "310".
+        number: Train number, e.g. 310.
         events: Subscriptions evaluated on every poll.
     """
 
     line: str
-    number: str
+    number: int
     events: list[TrainEvent]
 
 
@@ -93,9 +93,9 @@ class MetraSettings(models.SourceSettings):
 
     @pydantic.model_validator(mode="after")
     def _unique(self) -> Self:
-        trains = [f"{t.line} {t.number}" for t in self.trains]
+        trains = [f"{train.line} {train.number}" for train in self.trains]
         lines = [line.id for line in self.lines]
-        dupes = sorted({n for n in trains if trains.count(n) > 1} | {n for n in lines if lines.count(n) > 1})
+        dupes = models.duplicates(trains) + models.duplicates(lines)
         if dupes:
             raise ValueError(f"duplicate trains or lines: {', '.join(dupes)}")
 

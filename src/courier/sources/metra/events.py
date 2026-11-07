@@ -21,7 +21,7 @@ def _start_date(tu: TripUpdate) -> datetime.date | None:
         return None
 
 
-def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: str) -> list[TripUpdate]:
+def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: int) -> list[TripUpdate]:
     """Finds a train's trip updates in a feed.
 
     Args:
@@ -33,24 +33,29 @@ def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: s
     Returns:
         Matching trip updates, by schedule trip id or by parsed trip id.
     """
-    ids = schedule.trips.get((line, number), frozenset())
-    return [
-        e.trip_update
-        for e in feed.entity
-        if e.HasField("trip_update")
-        and (e.trip_update.trip.trip_id in ids or gtfs.parse_trip_id(e.trip_update.trip.trip_id) == (line, number))
-    ]
+    schedule_trip_ids = schedule.trips.get((line, number), frozenset())
+    trips = []
+
+    for entity in feed.entity:
+        if not entity.HasField("trip_update"):
+            continue
+
+        trip_id = entity.trip_update.trip.trip_id
+        if trip_id in schedule_trip_ids or gtfs.parse_trip_id(trip_id) == (line, number):
+            trips.append(entity.trip_update)
+
+    return trips
 
 
 def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input explicitly
     tu: TripUpdate,
     schedule: gtfs.Schedule,
     line: str,
-    number: str,
+    number: int,
     event: settings.TrainDelayed,
     today: datetime.date,
     tz: ZoneInfo,
-) -> message.Message | None:
+) -> message.Decision:
     """Builds a delay message when today's trip is late enough at its next stop.
 
     The next stop is the first update that is not skipped, has a time, and is in the schedule.
@@ -65,44 +70,50 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
         tz: Zone for the expected time in the body.
 
     Returns:
-        The message, or None.
+        The message or None, and a one-line reason either way.
     """
     start = _start_date(tu)
-    if start is None or start != today:
-        return None
+    if start is None:
+        return None, "trip has no start date"
+    if start != today:
+        return None, f"trip runs {start:%a %b %d}, not today"
 
     # the next stop, not the worst one: a train can make up time it lost earlier
-    nxt = next(
-        (
-            s
-            for s in tu.stop_time_update
-            if s.schedule_relationship != SKIPPED
-            and (s.arrival.time or s.departure.time)
-            and (tu.trip.trip_id, s.stop_sequence) in schedule.arrivals
-        ),
-        None,
-    )
-    if nxt is None:
-        return None
+    next_stop = None
+    for update in tu.stop_time_update:
+        if update.schedule_relationship == SKIPPED:
+            continue
+        if not update.arrival.time and not update.departure.time:
+            continue
+        if (tu.trip.trip_id, update.stop_sequence) not in schedule.arrivals:
+            continue
 
-    expected = nxt.arrival.time or nxt.departure.time
-    scheduled = gtfs.scheduled_at(start, schedule.arrivals[(tu.trip.trip_id, nxt.stop_sequence)])
+        next_stop = update
+        break
+
+    if next_stop is None:
+        return None, "no upcoming stop in schedule"
+
+    expected = next_stop.arrival.time or next_stop.departure.time
+    scheduled = gtfs.scheduled_at(start, schedule.arrivals[(tu.trip.trip_id, next_stop.stop_sequence)])
     minutes = int((expected - scheduled.timestamp()) // 60)
     if minutes < event.minutes:
-        return None
+        return None, f"{minutes} min late < {event.minutes}"
 
-    stop_name = schedule.stop_names.get(nxt.stop_id, nxt.stop_id)
+    stop_name = schedule.stop_names.get(next_stop.stop_id, next_stop.stop_id)
+    expected_at = datetime.datetime.fromtimestamp(expected, tz)
 
-    return message.Message(
+    delay = message.Message(
         title=f"{line} {number}: {minutes} min late",
-        body=f"Next stop {stop_name}, expected {datetime.datetime.fromtimestamp(expected, tz):%H:%M}.",
+        body=f"Next stop {stop_name}, expected {expected_at:%H:%M}.",
         priority="default",
         tags="train",
         sid=f"metra-{line}-{number}-{tu.trip.start_date}-delay",
     )
+    return delay, f"{minutes} min late ≥ {event.minutes}"
 
 
-def cancel_message(tu: TripUpdate, line: str, number: str, today: datetime.date) -> message.Message | None:
+def cancel_message(tu: TripUpdate, line: str, number: int, today: datetime.date) -> message.Decision:
     """Builds a cancellation message for a trip today or later.
 
     Args:
@@ -112,23 +123,29 @@ def cancel_message(tu: TripUpdate, line: str, number: str, today: datetime.date)
         today: Today in Metra time.
 
     Returns:
-        The message, or None.
+        The message or None, and a one-line reason either way.
     """
     start = _start_date(tu)
-    cancelled = tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED or (
-        bool(tu.stop_time_update) and all(s.schedule_relationship == SKIPPED for s in tu.stop_time_update)
-    )
+    if start is None:
+        return None, "trip has no start date"
+    if start < today:
+        return None, f"trip ran {start:%a %b %d}"
 
-    if start is None or start < today or not cancelled:
-        return None
+    trip_cancelled = tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED
+    skipped = [update.schedule_relationship == SKIPPED for update in tu.stop_time_update]
+    every_stop_skipped = bool(skipped) and all(skipped)
 
-    return message.Message(
+    if not trip_cancelled and not every_stop_skipped:
+        return None, "running"
+
+    cancellation = message.Message(
         title=f"{line} {number} cancelled",
         body=f"{start:%a %b %d} {tu.trip.start_time[:5]} departure is cancelled.",
         priority="high",
         tags="x",
         sid=f"metra-{line}-{number}-{tu.trip.start_date}-cancel",
     )
+    return cancellation, "cancelled"
 
 
 def alert_messages(feed: FeedMessage, line_id: str) -> list[tuple[str, message.Message]]:
@@ -143,25 +160,38 @@ def alert_messages(feed: FeedMessage, line_id: str) -> list[tuple[str, message.M
     """
     out = []
 
-    for e in feed.entity:
-        if not e.HasField("alert") or not any(i.route_id == line_id for i in e.alert.informed_entity):
+    for entity in feed.entity:
+        if not entity.HasField("alert"):
             continue
 
-        a = e.alert
-        title = a.header_text.translation[0].text if a.header_text.translation else "Metra alert"
-        body = a.description_text.translation[0].text if a.description_text.translation else ""
-        if a.url.translation:
-            body += "\n\n" + a.url.translation[0].text
+        alert = entity.alert
+        route_ids = [informed.route_id for informed in alert.informed_entity]
+        if line_id not in route_ids:
+            continue
+
+        title = "Metra alert"
+        if alert.header_text.translation:
+            title = alert.header_text.translation[0].text
+
+        body = ""
+        if alert.description_text.translation:
+            body = alert.description_text.translation[0].text
+        if alert.url.translation:
+            body += "\n\n" + alert.url.translation[0].text
+
+        priority = "default"
+        if alert.severity_level == gtfs_realtime_pb2.Alert.SEVERE:
+            priority = "high"
 
         out.append(
             (
-                e.id,
+                entity.id,
                 message.Message(
                     title=title,
                     body=body,
-                    priority="high" if a.severity_level == gtfs_realtime_pb2.Alert.SEVERE else "default",
+                    priority=priority,
                     tags="warning",
-                    sid=e.id,
+                    sid=entity.id,
                 ),
             )
         )
