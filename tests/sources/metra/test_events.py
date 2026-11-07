@@ -15,7 +15,7 @@ TZ = gtfs.METRA_TZ
 
 @pytest.fixture
 def schedule(bn1204_zip):
-    return gtfs.load_schedule(bn1204_zip, {("BNSF", "1204"), ("BNSF", "1254")})
+    return gtfs.load_schedule(bn1204_zip, {("BNSF", 1204), ("BNSF", 1254)})
 
 
 def _delayed(minutes):
@@ -47,13 +47,13 @@ def _tu(trip_id="BNSF_BN1254_V2_A", start_date="20261105", canceled=False, skipp
 
 
 def _real_tu(schedule):
-    (tu,) = events.train_trips(_feed("metra_tripupdates.pb"), schedule, "BNSF", "1204")
+    (tu,) = events.train_trips(_feed("metra_tripupdates.pb"), schedule, "BNSF", 1204)
     return tu
 
 
 def test_real_snapshot_delay(schedule):
     tu = _real_tu(schedule)
-    delay, reason = events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ)
+    delay, reason = events.delay_message(tu, schedule, "BNSF", 1204, _delayed(1), TODAY, TZ)
 
     assert delay is not None
     assert delay.title == "BNSF 1204: 1 min late"
@@ -61,13 +61,13 @@ def test_real_snapshot_delay(schedule):
     assert (delay.priority, delay.tags) == ("default", "train")
     assert reason == "1 min late ≥ 1"
 
-    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(2), TODAY, TZ) == (None, "1 min late < 2")
+    assert events.delay_message(tu, schedule, "BNSF", 1204, _delayed(2), TODAY, TZ) == (None, "1 min late < 2")
 
 
 def test_delay_ignores_other_dates(schedule):
     tu = _real_tu(schedule)
     event = _delayed(1)
-    assert events.delay_message(tu, schedule, "BNSF", "1204", event, datetime.date(2026, 11, 6), TZ) == (
+    assert events.delay_message(tu, schedule, "BNSF", 1204, event, datetime.date(2026, 11, 6), TZ) == (
         None,
         "trip runs Thu Nov 05, not today",
     )
@@ -76,7 +76,7 @@ def test_delay_ignores_other_dates(schedule):
 def test_delay_unknown_stop_sequences(schedule):
     tu = _tu("BNSF_BN1204_V2_AA", seqs=(90, 91))
     event = _delayed(1)
-    assert events.delay_message(tu, schedule, "BNSF", "1204", event, TODAY, TZ) == (
+    assert events.delay_message(tu, schedule, "BNSF", 1204, event, TODAY, TZ) == (
         None,
         "no upcoming stop in schedule",
     )
@@ -85,11 +85,11 @@ def test_delay_unknown_stop_sequences(schedule):
 def test_match_by_trip_id_fallback(schedule):
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.entity.add(id="1").trip_update.CopyFrom(_tu("BNSF_BN1204_V9_ZZ"))
-    assert len(events.train_trips(feed, schedule, "BNSF", "1204")) == 1
+    assert len(events.train_trips(feed, schedule, "BNSF", 1204)) == 1
 
 
 def test_cancel_trip_canceled():
-    cancellation, reason = events.cancel_message(_tu(canceled=True), "BNSF", "1254", TODAY)
+    cancellation, reason = events.cancel_message(_tu(canceled=True), "BNSF", 1254, TODAY)
     assert cancellation is not None
     assert cancellation.title == "BNSF 1254 cancelled"
     assert cancellation.priority == "high"
@@ -98,22 +98,22 @@ def test_cancel_trip_canceled():
 
 
 def test_cancel_all_skipped():
-    assert events.cancel_message(_tu(skipped=(True, True)), "BNSF", "1254", TODAY)[0] is not None
+    assert events.cancel_message(_tu(skipped=(True, True)), "BNSF", 1254, TODAY)[0] is not None
 
 
 def test_cancel_some_skipped():
-    assert events.cancel_message(_tu(skipped=(True, False)), "BNSF", "1254", TODAY) == (None, "running")
+    assert events.cancel_message(_tu(skipped=(True, False)), "BNSF", 1254, TODAY) == (None, "running")
 
 
 def test_cancel_future_date():
-    cancellation, _ = events.cancel_message(_tu(start_date="20261106", canceled=True), "BNSF", "1254", TODAY)
+    cancellation, _ = events.cancel_message(_tu(start_date="20261106", canceled=True), "BNSF", 1254, TODAY)
     assert cancellation is not None
     assert "Fri Nov 06" in cancellation.body
     assert cancellation.sid.endswith("-20261106-cancel")
 
 
 def test_cancel_past_date():
-    assert events.cancel_message(_tu(start_date="20261104", canceled=True), "BNSF", "1254", TODAY) == (
+    assert events.cancel_message(_tu(start_date="20261104", canceled=True), "BNSF", 1254, TODAY) == (
         None,
         "trip ran Wed Nov 04",
     )
@@ -157,8 +157,8 @@ def test_severe_alert_priority_high():
 def test_missing_start_date_is_ignored(schedule):
     tu = _tu("BNSF_BN1204_V2_AA", start_date="", canceled=True, seqs=(25,))
     no_start_date = (None, "trip has no start date")
-    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ) == no_start_date
-    assert events.cancel_message(tu, "BNSF", "1204", TODAY) == no_start_date
+    assert events.delay_message(tu, schedule, "BNSF", 1204, _delayed(1), TODAY, TZ) == no_start_date
+    assert events.cancel_message(tu, "BNSF", 1204, TODAY) == no_start_date
 
 
 def _with_leading_skipped(tu):
@@ -174,7 +174,7 @@ def _with_leading_skipped(tu):
 
 def test_delay_next_stop_skips_skipped_updates(schedule):
     tu = _with_leading_skipped(_real_tu(schedule))
-    delay, _ = events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ)
+    delay, _ = events.delay_message(tu, schedule, "BNSF", 1204, _delayed(1), TODAY, TZ)
     assert delay is not None
     assert delay.body == "Next stop Cicero, expected 05:59."
 
@@ -184,7 +184,7 @@ def test_delay_all_stops_skipped(schedule):
     for stu in tu.stop_time_update:
         stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
 
-    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ) == (
+    assert events.delay_message(tu, schedule, "BNSF", 1204, _delayed(1), TODAY, TZ) == (
         None,
         "no upcoming stop in schedule",
     )
@@ -197,8 +197,8 @@ def test_delay_measured_at_next_stop(schedule):
         stu = tu.stop_time_update.add(stop_sequence=seq, stop_id="CICERO")
         stu.arrival.time = int(gtfs.scheduled_at(TODAY, secs).timestamp()) + late * 60
 
-    delay, _ = events.delay_message(tu, schedule, "BNSF", "1204", _delayed(1), TODAY, TZ)
+    delay, _ = events.delay_message(tu, schedule, "BNSF", 1204, _delayed(1), TODAY, TZ)
 
     assert delay is not None
     assert delay.title == "BNSF 1204: 2 min late"
-    assert events.delay_message(tu, schedule, "BNSF", "1204", _delayed(3), TODAY, TZ)[0] is None
+    assert events.delay_message(tu, schedule, "BNSF", 1204, _delayed(3), TODAY, TZ)[0] is None

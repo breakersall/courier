@@ -52,7 +52,7 @@ class Env:
         return metra.MetraSource(cfg, http, gtfs.METRA_TZ, clock=lambda: self.now)
 
 
-def train(line: str, number: str) -> dict:
+def train(line: str, number: int) -> dict:
     return {"line": line, "number": number, "events": [{"type": "train_delayed", "target": "phone", "minutes": 1}]}
 
 
@@ -67,7 +67,7 @@ def env(bn1204_zip) -> Env:
 
 async def test_start_missing_train_lists_available(env) -> None:
     with pytest.raises(message.SourceConfigError, match=r"^not found in schedule: .*BNSF 9999.*1204"):
-        await env.source(trains=[train("BNSF", "9999")]).start()
+        await env.source(trains=[train("BNSF", 9999)]).start()
 
 
 async def test_start_missing_line(env) -> None:
@@ -78,11 +78,11 @@ async def test_start_missing_line(env) -> None:
 async def test_start_schedule_error_raises(env) -> None:
     env.zip_status = 500
     with pytest.raises(message.SourceError, match="HTTP 500"):
-        await env.source(trains=[train("BNSF", "1204")]).start()
+        await env.source(trains=[train("BNSF", 1204)]).start()
 
 
 async def test_poll_delay_check(env) -> None:
-    src = env.source(trains=[train("BNSF", "1204")])
+    src = env.source(trains=[train("BNSF", 1204)])
     await src.start()
     (delayed,) = await src.poll(NOW)
 
@@ -98,7 +98,7 @@ async def test_poll_alert_keys_include_alert_id(env) -> None:
 
 
 async def test_train_not_in_feed_has_unmatched_checks(env) -> None:
-    src = env.source(trains=[train("BNSF", "1254")])
+    src = env.source(trains=[train("BNSF", 1254)])
     await src.start()
 
     (missing,) = await src.poll(NOW)
@@ -131,7 +131,7 @@ async def test_poll_skips_unneeded_feeds(env) -> None:
 
 
 async def test_schedule_refresh_only_when_published_changes(env) -> None:
-    src = env.source(trains=[train("BNSF", "1204")])
+    src = env.source(trains=[train("BNSF", 1204)])
     await src.start()
 
     env.now = 3601
@@ -145,7 +145,7 @@ async def test_schedule_refresh_only_when_published_changes(env) -> None:
 
 
 async def test_schedule_refresh_failure_keeps_old(env) -> None:
-    src = env.source(trains=[train("BNSF", "1204")])
+    src = env.source(trains=[train("BNSF", 1204)])
     await src.start()
 
     env.published = "v2"
@@ -170,7 +170,7 @@ async def test_poll_alert_on_two_lines_emitted_once(env) -> None:
 
 
 async def test_refresh_warns_for_train_missing_after_reload(env, caplog, make_gtfs_zip) -> None:
-    src = env.source(trains=[train("BNSF", "1204")])
+    src = env.source(trains=[train("BNSF", 1204)])
     await src.start()
 
     env.zip = make_gtfs_zip(["BNSF_BN1254_V2_A"], [])  # 1204 renumbered away

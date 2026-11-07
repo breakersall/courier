@@ -25,13 +25,13 @@ class Schedule:
         arrivals: Arrival seconds since service-day start, per (trip id, stop sequence), for configured trains.
     """
 
-    trips: dict[tuple[str, str], frozenset[str]]
+    trips: dict[tuple[str, int], frozenset[str]]
     lines: frozenset[str]
     stop_names: dict[str, str]
     arrivals: dict[tuple[str, int], int]
 
 
-def parse_trip_id(trip_id: str) -> tuple[str, str] | None:
+def parse_trip_id(trip_id: str) -> tuple[str, int] | None:
     """Splits a trip id into (line, train number).
 
     Args:
@@ -45,7 +45,7 @@ def parse_trip_id(trip_id: str) -> tuple[str, str] | None:
     if match is None:
         return None
 
-    return (match["line"], match["number"])
+    return (match["line"], int(match["number"]))
 
 
 def gtfs_seconds(value: str) -> int:
@@ -70,7 +70,7 @@ def scheduled_at(start_date: datetime.date, seconds: int) -> datetime.datetime:
     return (noon - datetime.timedelta(hours=12) + datetime.timedelta(seconds=seconds)).astimezone(METRA_TZ)
 
 
-def load_schedule(zip_bytes: bytes, wanted: set[tuple[str, str]]) -> Schedule:
+def load_schedule(zip_bytes: bytes, wanted: set[tuple[str, int]]) -> Schedule:
     """Parses the static GTFS schedule zip.
 
     Args:
@@ -90,7 +90,7 @@ def load_schedule(zip_bytes: bytes, wanted: set[tuple[str, str]]) -> Schedule:
 
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
-            trips: dict[tuple[str, str], set[str]] = {}
+            trips: dict[tuple[str, int], set[str]] = {}
             for row in rows("trips.txt"):
                 train = parse_trip_id(row["trip_id"])
                 if train is not None:

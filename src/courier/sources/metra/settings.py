@@ -48,12 +48,12 @@ class Train(models.Model):
 
     Attributes:
         line: Metra line id, e.g. "UP-N".
-        number: Train number, e.g. "310".
+        number: Train number, e.g. 310.
         events: Subscriptions evaluated on every poll.
     """
 
     line: str
-    number: str
+    number: int
     events: list[TrainEvent]
 
 

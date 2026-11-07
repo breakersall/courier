@@ -21,7 +21,7 @@ def _start_date(tu: TripUpdate) -> datetime.date | None:
         return None
 
 
-def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: str) -> list[TripUpdate]:
+def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: int) -> list[TripUpdate]:
     """Finds a train's trip updates in a feed.
 
     Args:
@@ -51,7 +51,7 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     tu: TripUpdate,
     schedule: gtfs.Schedule,
     line: str,
-    number: str,
+    number: int,
     event: settings.TrainDelayed,
     today: datetime.date,
     tz: ZoneInfo,
@@ -113,7 +113,7 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     return delay, f"{minutes} min late ≥ {event.minutes}"
 
 
-def cancel_message(tu: TripUpdate, line: str, number: str, today: datetime.date) -> message.Decision:
+def cancel_message(tu: TripUpdate, line: str, number: int, today: datetime.date) -> message.Decision:
     """Builds a cancellation message for a trip today or later.
 
     Args:

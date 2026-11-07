@@ -71,7 +71,7 @@ class MetraSource:
             numbers = [number for line, number in schedule.trips if line == train.line]
             available = "(none)"
             if numbers:
-                available = ", ".join(sorted(numbers, key=int))
+                available = ", ".join(str(number) for number in sorted(numbers))
 
             problems.append(f"{train.line} {train.number} (available on {train.line}: {available})")
 
