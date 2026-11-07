@@ -2,7 +2,9 @@ import asyncio
 import datetime
 import functools
 import json
+import os
 import pathlib
+import signal
 import socket
 from typing import Any
 import zoneinfo
@@ -59,12 +61,17 @@ def target(window: dict[str, str] | None = None) -> dict[str, ntfy.NtfyTarget]:
     }
 
 
-def alert(limit: int | None = 2, priority: str | None = None, key: str = "Rex:battery_low:phone") -> message.Alert:
+def check(
+    limit: int | None = 2,
+    priority: str | None = None,
+    key: str = "Rex:battery_low:phone",
+    matched: message.Message | None = MSG,
+) -> message.Check:
     raw = {"type": "battery_low", "target": "phone", "priority": priority}
     if limit is not None:
         raw["max_per_window"] = limit
     event = fi_settings.BatteryLow.model_validate(raw)
-    return message.Alert(key, event, MSG)
+    return message.Check(key, event, matched, "battery 37% < threshold 40%")
 
 
 class Ntfy:
@@ -80,24 +87,24 @@ class Ntfy:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
 
 
-async def deliver_at(ntfy_: Ntfy, alerts: list[message.Alert], *times: datetime.datetime, **window: str) -> loop.States:
+async def deliver_at(ntfy_: Ntfy, polled: list[message.Check], *times: datetime.datetime, **window: str) -> loop.States:
     states: loop.States = {}
     async with ntfy_.client() as http:
         for t in times:
-            await loop.deliver("dogs", alerts, target(window or None), http, states, t)
+            await loop.deliver("dogs", polled, target(window or None), http, states, t)
     return states
 
 
 async def test_deliver_respects_limit() -> None:
     ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert()], at(8), at(8, 5), at(14), start="08:00", end="20:00")
+    states = await deliver_at(ntfy_, [check()], at(8), at(8, 5), at(14), start="08:00", end="20:00")
     assert len(ntfy_.requests) == 2
     assert states[("dogs", "Rex:battery_low:phone")].sent == 2
 
 
 async def test_deliver_default_once_per_window() -> None:
     ntfy_ = Ntfy()
-    await deliver_at(ntfy_, [alert(limit=None)], at(8), at(12), at(19))
+    await deliver_at(ntfy_, [check(limit=None)], at(8), at(12), at(19))
     assert len(ntfy_.requests) == 1
 
 
@@ -106,11 +113,41 @@ async def test_deliver_cleared_alert_starts_fresh_budget() -> None:
     states: loop.States = {("other", "Rex:battery_low:phone"): limiter.LimiterState()}
 
     async with ntfy_.client() as http:
-        for alerts in ([alert(limit=1)], [alert(limit=1)], [], [alert(limit=1)]):
-            await loop.deliver("dogs", alerts, target(), http, states, at(9))
+        for polled in ([check(limit=1)], [check(limit=1)], [], [check(limit=1)]):
+            await loop.deliver("dogs", polled, target(), http, states, at(9))
 
     assert len(ntfy_.requests) == 2
     assert ("other", "Rex:battery_low:phone") in states  # other sources' state untouched
+
+
+async def test_deliver_logs_each_decision(caplog: pytest.LogCaptureFixture) -> None:
+    windowed = target({"start": "08:00", "end": "20:00"})
+    states: loop.States = {}
+
+    with caplog.at_level("DEBUG", logger="courier"):
+        async with Ntfy().client() as http:
+            await loop.deliver("dogs", [check(key="low")], windowed, http, states, at(9))
+            await loop.deliver("dogs", [check(key="low")], windowed, http, states, at(10))
+            await loop.deliver("dogs", [check(key="night")], windowed, http, {}, at(21))
+            await loop.deliver("dogs", [check(key="ok", matched=None)], windowed, http, {}, at(9))
+
+    assert caplog.messages == [
+        "dogs/low matched (battery 37% < threshold 40%), sent to phone",
+        "dogs/low matched (battery 37% < threshold 40%), held: next allowed 14:30",
+        "dogs/night matched (battery 37% < threshold 40%), held: outside window 08:00–20:00",  # noqa: RUF001
+        "dogs/ok no match: battery 37% < threshold 40%",
+    ]
+
+
+async def test_deliver_unmatched_check_clears_state() -> None:
+    key = "Rex:battery_low:phone"
+    states: loop.States = {("dogs", key): limiter.LimiterState(window_date=at(9).date(), sent=1)}
+
+    async with Ntfy().client() as http:
+        changed = await loop.deliver("dogs", [check(matched=None)], target(), http, states, at(9))
+
+    assert states == {}
+    assert changed
 
 
 def notifications(result: str) -> float:
@@ -124,7 +161,7 @@ def notifications(result: str) -> float:
 
 async def test_deliver_counts_metrics() -> None:
     sent, limited = notifications("sent"), notifications("limited")
-    await deliver_at(Ntfy(), [alert(limit=1)], at(8), at(8, 5), start="08:00", end="20:00")
+    await deliver_at(Ntfy(), [check(limit=1)], at(8), at(8, 5), start="08:00", end="20:00")
 
     assert notifications("sent") - sent == 1
     assert notifications("limited") - limited == 1
@@ -132,7 +169,7 @@ async def test_deliver_counts_metrics() -> None:
 
 async def test_deliver_outside_window() -> None:
     ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert()], at(21), start="08:00", end="20:00")
+    states = await deliver_at(ntfy_, [check()], at(21), start="08:00", end="20:00")
     assert ntfy_.requests == []
     assert states == {}
 
@@ -141,7 +178,7 @@ async def test_deliver_failed_send_not_recorded(caplog: pytest.LogCaptureFixture
     ntfy_ = Ntfy(status=500)
     async with ntfy_.client() as http:
         states: loop.States = {}
-        sent = await loop.deliver("dogs", [alert()], target(), http, states, at(9))
+        sent = await loop.deliver("dogs", [check()], target(), http, states, at(9))
 
     assert not sent
     assert len(ntfy_.requests) == 1
@@ -151,7 +188,7 @@ async def test_deliver_failed_send_not_recorded(caplog: pytest.LogCaptureFixture
 
 async def test_deliver_priority_override() -> None:
     ntfy_ = Ntfy()
-    await deliver_at(ntfy_, [alert(priority="urgent")], at(9))
+    await deliver_at(ntfy_, [check(priority="urgent")], at(9))
     assert ntfy_.requests[0].url.params["priority"] == "urgent"
 
 
@@ -170,7 +207,7 @@ async def test_deliver_unexpected_failure_does_not_skip_rest(
 
     monkeypatch.setattr(ntfy, "send_ntfy", flaky)
     ntfy_ = Ntfy()
-    states = await deliver_at(ntfy_, [alert(key="a"), alert(key="b")], at(9))
+    states = await deliver_at(ntfy_, [check(key="a"), check(key="b")], at(9))
     assert len(ntfy_.requests) == 1
     assert set(states) == {("dogs", "b")}
     assert "boom" in caplog.text
@@ -186,9 +223,12 @@ class FakeSource:
         if self.start_errors:
             raise self.start_errors.pop(0)
 
-    async def poll(self, now: datetime.datetime) -> list[message.Alert]:
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
         self.polls += 1
-        result = self.results.pop(0) if self.results else []
+        if not self.results:
+            return []
+
+        result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
         return result
@@ -306,7 +346,7 @@ async def test_start_error_retries_while_others_run(
 async def test_source_error_keeps_running(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([message.SourceError("upstream down"), [alert()]])})
+    patch_sources(monkeypatch, {"dogs": FakeSource([message.SourceError("upstream down"), [check()]])})
     await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 120))
     assert "upstream down" in caplog.text
     assert len(ntfy_mock.requests) == 1
@@ -315,7 +355,7 @@ async def test_source_error_keeps_running(
 async def test_failed_poll_does_not_clear(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
 ) -> None:
-    results = [[alert(limit=1)], message.SourceError("down"), [alert(limit=1)]]
+    results = [[check(limit=1)], message.SourceError("down"), [check(limit=1)]]
     patch_sources(monkeypatch, {"dogs": FakeSource(results)})
     await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
     assert len(ntfy_mock.requests) == 1
@@ -324,13 +364,13 @@ async def test_failed_poll_does_not_clear(
 async def test_cleared_poll_notifies_again(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy
 ) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([[alert(limit=1)], [], [alert(limit=1)]])})
+    patch_sources(monkeypatch, {"dogs": FakeSource([[check(limit=1)], [], [check(limit=1)]])})
     await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 180))
     assert len(ntfy_mock.requests) == 2
 
 
 async def test_state_saved_and_pruned(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
-    patch_sources(monkeypatch, {"dogs": FakeSource([[alert()]])})
+    patch_sources(monkeypatch, {"dogs": FakeSource([[check()]])})
     cfg = make_settings(tmp_path)
 
     old = {json.dumps(["dogs", "old"]): {"window_date": "2020-01-01", "sent": 1, "next_allowed": None}}
@@ -342,3 +382,24 @@ async def test_state_saved_and_pruned(tmp_path: pathlib.Path, monkeypatch: pytes
     today = datetime.datetime.now(cfg.timezone).date().isoformat()
     assert list(saved) == [json.dumps(["dogs", "Rex:battery_low:phone"])]
     assert saved[json.dumps(["dogs", "Rex:battery_low:phone"])]["window_date"] == today
+
+
+class SigtermSource(FakeSource):
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await super().poll(now)
+
+
+async def test_sigterm_stops_run(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy) -> None:
+    patch_sources(monkeypatch, {"dogs": SigtermSource()})
+
+    await asyncio.wait_for(loop.run(make_settings(tmp_path)), 5)  # real wait: returns as soon as SIGTERM sets stop
+
+
+async def test_error_without_message_names_the_exception(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, ntfy_mock: Ntfy, caplog: pytest.LogCaptureFixture
+) -> None:
+    patch_sources(monkeypatch, {"dogs": FakeSource([httpx.ReadTimeout("")])})
+    await loop.run(make_settings(tmp_path), wait=VirtualClock(1, 60))
+
+    assert "dogs poll failed: ReadTimeout" in caplog.text

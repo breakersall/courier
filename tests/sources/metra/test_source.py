@@ -12,6 +12,11 @@ from courier.sources import metra
 from courier.sources.metra import gtfs
 from courier.sources.metra import settings
 
+
+def matched_keys(checks: list[message.Check]) -> list[str]:
+    return [check.key for check in checks if check.message]
+
+
 FIXTURES = pathlib.Path(__file__).parents[2] / "fixtures"
 NOW = datetime.datetime(2026, 11, 5, 5, 56, tzinfo=gtfs.METRA_TZ)
 ALERT_ID = "DevAPI-4CB43442-B843-4E77-A336-EFDACE89B1CE"
@@ -80,16 +85,42 @@ async def test_start_schedule_error_raises(env) -> None:
 async def test_poll_delay_alert_key(env) -> None:
     src = env.source(trains=[train("BNSF", "1204")])
     await src.start()
-    alerts = await src.poll(NOW)
-    assert [a.key for a in alerts] == ["BNSF1204:train_delayed:phone"]
+    assert matched_keys(await src.poll(NOW)) == ["BNSF1204:train_delayed:phone"]
 
 
 async def test_poll_alert_keys_include_alert_id(env) -> None:
     src = env.source(lines=[line("HC")])
     await src.start()
-    alerts = await src.poll(NOW)
-    assert alerts
-    assert alerts[0].key == f"HC:service_alert:phone:{ALERT_ID}"
+    assert f"HC:service_alert:phone:{ALERT_ID}" in matched_keys(await src.poll(NOW))
+
+
+async def test_train_check_reason(env) -> None:
+    src = env.source(trains=[train("BNSF", "1204")])
+    await src.start()
+    (delayed,) = await src.poll(NOW)
+
+    assert delayed.reason == "1 min late ≥ 1"
+
+
+async def test_train_not_in_feed_has_no_checks(env) -> None:
+    src = env.source(trains=[train("BNSF", "1254")])
+    await src.start()
+    assert await src.poll(NOW) == []
+
+
+async def test_line_without_alerts_has_unmatched_checks(env) -> None:
+    empty_feed = gtfs_realtime_pb2.FeedMessage()
+    empty_feed.header.gtfs_realtime_version = "2.0"
+    env.alerts = empty_feed.SerializeToString()
+    src = env.source(lines=[line("BNSF")])
+    await src.start()
+    (no_alerts,) = await src.poll(NOW)
+
+    assert (no_alerts.key, no_alerts.message, no_alerts.reason) == (
+        "BNSF:service_alert:phone",
+        None,
+        "no alerts in effect",
+    )
 
 
 async def test_poll_skips_unneeded_feeds(env) -> None:
@@ -121,9 +152,7 @@ async def test_schedule_refresh_failure_keeps_old(env) -> None:
     env.published = "v2"
     env.zip_status = 500
     env.now = 3601
-    alerts = await src.poll(NOW)
-
-    assert [a.key for a in alerts] == ["BNSF1204:train_delayed:phone"]
+    assert matched_keys(await src.poll(NOW)) == ["BNSF1204:train_delayed:phone"]
 
 
 async def test_poll_alert_on_two_lines_emitted_once(env) -> None:
@@ -136,7 +165,7 @@ async def test_poll_alert_on_two_lines_emitted_once(env) -> None:
     env.alerts = feed.SerializeToString()
     src = env.source(lines=[line("HC"), line("BNSF")])
     await src.start()
-    keys = [a.key for a in await src.poll(NOW) if a.key.endswith(ALERT_ID)]
+    keys = [key for key in matched_keys(await src.poll(NOW)) if key.endswith(ALERT_ID)]
 
     assert keys == [f"HC:service_alert:phone:{ALERT_ID}"]
 

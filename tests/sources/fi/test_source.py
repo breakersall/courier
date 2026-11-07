@@ -42,14 +42,24 @@ async def test_start_missing_collar_raises() -> None:
         await source("Ghost").start()
 
 
-async def test_poll_returns_alert_keys() -> None:
-    alerts = await source("Rex").poll(NOW)
-    assert [a.key for a in alerts] == ["Rex:battery_low:phone"]
-    assert alerts[0].message.title == "Rex: Battery Low"
-    assert alerts[0].event.target == "phone"
+async def test_poll_returns_checks() -> None:
+    (battery_check,) = await source("Rex").poll(NOW)
+
+    assert battery_check.key == "Rex:battery_low:phone"
+    assert battery_check.message is not None
+    assert battery_check.message.title == "Rex: Battery Low"
+    assert battery_check.event.target == "phone"
+    assert battery_check.reason.startswith("battery ")
 
 
-async def test_poll_missing_collar_warns(caplog: pytest.LogCaptureFixture) -> None:
+async def test_poll_unmatched_check_has_reason() -> None:
+    (battery_check,) = await source("Bella").poll(NOW)
+
+    assert battery_check.message is None
+    assert "≥ threshold" in battery_check.reason
+
+
+async def test_poll_missing_collar_has_no_checks(caplog: pytest.LogCaptureFixture) -> None:
     assert await source("Ghost").poll(NOW) == []
     assert "Ghost" in caplog.text
 

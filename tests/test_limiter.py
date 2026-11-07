@@ -22,11 +22,11 @@ def test_window_bounds() -> None:
 def test_n2_from_0800() -> None:
     s = limiter.record(limiter.LimiterState(), at(8), DAY, 2)
     assert s.next_allowed == at(14)
-    assert limiter.allowed(s, at(13, 59), DAY, 2) is False
-    assert limiter.allowed(s, at(14), DAY, 2) is True
+    assert limiter.blocked(s, at(13, 59), DAY, 2) is not None
+    assert limiter.blocked(s, at(14), DAY, 2) is None
 
     s = limiter.record(s, at(14), DAY, 2)
-    assert limiter.allowed(s, at(19), DAY, 2) is False
+    assert limiter.blocked(s, at(19), DAY, 2) is not None
 
 
 def test_n2_first_match_1800() -> None:
@@ -43,20 +43,20 @@ def test_n3_even_slots() -> None:
 
 def test_shared_budget_after_clear() -> None:
     s = limiter.record(limiter.LimiterState(), at(8), DAY, 2)
-    assert limiter.allowed(s, at(17), DAY, 2) is True
+    assert limiter.blocked(s, at(17), DAY, 2) is None
     s = limiter.record(s, at(17), DAY, 2)
-    assert limiter.allowed(s, at(19, 30), DAY, 2) is False
+    assert limiter.blocked(s, at(19, 30), DAY, 2) is not None
 
 
 def test_outside_window_denied() -> None:
-    assert limiter.allowed(limiter.LimiterState(), at(7, 59), DAY, 1) is False
-    assert limiter.allowed(limiter.LimiterState(), at(20), DAY, 2) is False
+    assert limiter.blocked(limiter.LimiterState(), at(7, 59), DAY, 1) is not None
+    assert limiter.blocked(limiter.LimiterState(), at(20), DAY, 2) is not None
 
 
 def test_day_rollover_resets() -> None:
     s = limiter.record(limiter.LimiterState(), at(8), DAY, 1)
-    assert limiter.allowed(s, at(19), DAY, 1) is False
-    assert limiter.allowed(s, at(8, day=10), DAY, 1) is True
+    assert limiter.blocked(s, at(19), DAY, 1) is not None
+    assert limiter.blocked(s, at(8, day=10), DAY, 1) is None
     s = limiter.record(s, at(8, day=10), DAY, 1)
     assert s.sent == 1
 
@@ -77,4 +77,31 @@ def test_window_days() -> None:
     weekdays = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "fri"])
     assert limiter.window_bounds(at(9), weekdays) == (at(8), at(20))  # Fri
     assert limiter.window_bounds(at(9, day=10), weekdays) is None  # Sat
-    assert limiter.allowed(limiter.LimiterState(), at(9, day=10), weekdays, 1) is False
+    assert limiter.blocked(limiter.LimiterState(), at(9, day=10), weekdays, 1) is not None
+
+
+WEEKDAYS = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "tue", "wed", "thu", "fri"])
+FRESH = limiter.LimiterState()
+ONE_SENT = limiter.LimiterState(window_date=at(9).date(), sent=1)
+ONE_SENT_NEXT_AT_14 = limiter.LimiterState(window_date=at(9).date(), sent=1, next_allowed=at(14))
+
+
+def test_blocked_outside_window() -> None:
+    assert limiter.blocked(FRESH, at(21), DAY, 1) == "outside window 08:00–20:00"  # noqa: RUF001
+
+
+def test_blocked_excluded_weekday() -> None:
+    saturday = at(9, day=10)
+    assert limiter.blocked(FRESH, saturday, WEEKDAYS, 1) == "not on Saturday"
+
+
+def test_blocked_budget_used() -> None:
+    assert limiter.blocked(ONE_SENT, at(9), None, 1) == "budget used: 1 of 1 today"
+
+
+def test_blocked_next_allowed() -> None:
+    assert limiter.blocked(ONE_SENT_NEXT_AT_14, at(9), None, 2) == "next allowed 14:00"
+
+
+def test_blocked_none_when_allowed() -> None:
+    assert limiter.blocked(FRESH, at(9), None, 1) is None

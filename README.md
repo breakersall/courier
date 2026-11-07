@@ -30,6 +30,8 @@ Each entry under `sources` is keyed by a name of your choice and has a `type` (`
 
 Each entry under `targets` is keyed by a name of your choice and is a full ntfy topic URL with its own credentials and `window`. Each event picks one with `target:`, so different sources or events can go to different topics on the same server.
 
+To see why an event did or did not notify, run with `--log-level DEBUG` (see [Logging](#logging)).
+
 ## Sources
 
 ### Fi
@@ -99,6 +101,14 @@ To build the image locally, run `just docker-build`.
 ### Logging
 
 `--log-format json` (or `LOG_FORMAT=json`) writes one JSON object per line. JSON lines have no timestamp, because Docker and Kubernetes add one.
+
+Each sent notification is logged at `INFO` with the reason its event matched. `--log-level DEBUG` (or `LOG_LEVEL=DEBUG`) also logs, on every poll, each event that did not match and each match that the window or rate limit held back, with the reason:
+
+```
+DEBUG courier: dogs/Rex:battery_low:phone no match: battery 52% ≥ threshold 40%
+DEBUG courier: commute/BNSF1254:train_delayed:phone matched (7 min late ≥ 5), held: budget used: 1 of 1 today
+INFO courier: dogs/Rex:lost_mode:phone matched (mode is lost dog), sent to phone
+```
 
 ### Health Check
 

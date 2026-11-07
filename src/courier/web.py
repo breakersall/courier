@@ -38,13 +38,16 @@ async def serve(app: types.ASGIApp, host: str, port: int, stop: asyncio.Event) -
     Raises:
         ServeError: The server could not start, e.g. the port is in use.
     """
-    config = uvicorn.Config(app, host=host, port=port, log_config=None, access_log=False, lifespan="off")
+    config = uvicorn.Config(
+        app, host=host, port=port, log_config=None, access_log=False, lifespan="off", timeout_graceful_shutdown=5
+    )
     server = _Server(config)
     server_task = asyncio.create_task(_serve_until_exit(server, port))
     stop_requested = asyncio.create_task(stop.wait())
 
-    await asyncio.wait({server_task, stop_requested}, return_when=asyncio.FIRST_COMPLETED)
-
-    server.should_exit = True
-    stop_requested.cancel()
-    await server_task
+    try:
+        await asyncio.wait({server_task, stop_requested}, return_when=asyncio.FIRST_COMPLETED)
+    finally:  # also on cancellation, e.g. a sibling task in the TaskGroup failed
+        server.should_exit = True
+        stop_requested.cancel()
+        await server_task

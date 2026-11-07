@@ -41,7 +41,11 @@ def parse_trip_id(trip_id: str) -> tuple[str, str] | None:
         The (line, number) pair, or None if the id does not match.
     """
     m = _TRIP_ID.match(trip_id)
-    return (m["line"], m["number"]) if m else None
+
+    if m is None:
+        return None
+
+    return (m["line"], m["number"])
 
 
 def gtfs_seconds(value: str) -> int:

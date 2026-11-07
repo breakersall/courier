@@ -74,3 +74,29 @@ async def test_serve_port_in_use_exits() -> None:
 
         with pytest.raises(web.ServeError, match=f"port {port}"):
             await asyncio.wait_for(web.serve(health.app(health.Health({})), "127.0.0.1", port, asyncio.Event()), 5)
+
+
+async def test_cancelled_serve_stops_its_server() -> None:
+    healthy_port = free_port()
+
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        busy_port = occupied.getsockname()[1]
+
+        async def busy_after_healthy_is_up() -> None:
+            await get(healthy_port, "/healthz")
+            await web.serve(health.app(health.Health({})), "127.0.0.1", busy_port, asyncio.Event())
+
+        async def serve_both() -> None:
+            async with asyncio.TaskGroup() as task_group:
+                healthy = web.serve(health.app(health.Health({})), "127.0.0.1", healthy_port, asyncio.Event())
+                task_group.create_task(healthy)
+                task_group.create_task(busy_after_healthy_is_up())
+
+        with pytest.raises(ExceptionGroup):
+            await serve_both()
+
+    with pytest.raises(httpx.ConnectError):
+        async with httpx.AsyncClient() as http_client:
+            await http_client.get(f"http://127.0.0.1:{healthy_port}/healthz")

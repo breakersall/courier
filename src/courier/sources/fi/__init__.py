@@ -45,10 +45,10 @@ class FiSource:
                 f"collars not found on Fi account: {', '.join(missing)}; available: {available}"
             )
 
-    async def poll(self, now: datetime.datetime) -> list[message.Alert]:
-        """Returns one alert per collar event that matches at `now`."""
+    async def poll(self, now: datetime.datetime) -> list[message.Check]:
+        """Returns each configured collar event evaluated at `now`."""
         pets = {p.name: p for p in await self._client.fetch_pets()}
-        alerts = []
+        checks = []
 
         for collar in self._settings.collars:
             pet = pets.get(collar.name)
@@ -57,8 +57,7 @@ class FiSource:
                 continue
 
             for key, event in zip(message.event_keys(collar.name, collar.events), collar.events, strict=True):
-                msg = events.evaluate(pet, event, now, self._tz)
-                if msg is not None:
-                    alerts.append(message.Alert(key, event, msg))
+                matched, reason = events.evaluate(pet, event, now, self._tz)
+                checks.append(message.Check(key, event, matched, reason))
 
-        return alerts
+        return checks

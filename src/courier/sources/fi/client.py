@@ -84,12 +84,14 @@ def _parse_pet(pet: dict[str, Any]) -> PetStatus:
 
     conn = device["lastConnectionState"]
     charging = info.get("isCharging")
+    if charging is not None:
+        charging = bool(charging)
 
     return PetStatus(
         pet_id=pet["id"],
         name=pet["name"],
         battery_percent=round(float(info["batteryPercent"])),
-        is_charging=None if charging is None else bool(charging),
+        is_charging=charging,
         connection_type=conn["__typename"],
         last_connection=parse_fi_date(conn["date"]),
         mode=device["operationParams"]["mode"],

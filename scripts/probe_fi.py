@@ -78,7 +78,10 @@ async def probe(email: str, password: str) -> None:
 
 def main() -> None:
     """Reads the credentials file and runs the probe."""
-    path = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "~/.config/courier/fi-creds")
+    path = pathlib.Path("~/.config/courier/fi-creds")
+    if len(sys.argv) > 1:
+        path = pathlib.Path(sys.argv[1])
+
     email, password = path.expanduser().read_text().splitlines()[:2]
 
     asyncio.run(probe(email, password))

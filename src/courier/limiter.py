@@ -44,30 +44,44 @@ def window_bounds(
         start = datetime.datetime.combine(day, window.start, tzinfo=t.tzinfo)
         end = datetime.datetime.combine(day, window.end, tzinfo=t.tzinfo)
 
-    return (start, end) if start <= t < end else None
+    if not start <= t < end:
+        return None
+
+    return (start, end)
 
 
 def _today(state: LimiterState, t: datetime.datetime) -> LimiterState:
-    return state if state.window_date == t.date() else LimiterState(window_date=t.date())
+    if state.window_date == t.date():
+        return state
+
+    return LimiterState(window_date=t.date())
 
 
-def allowed(state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int) -> bool:
-    """Returns whether a notification may be sent at `t`.
+def blocked(state: LimiterState, t: datetime.datetime, window: models.Window | None, max_per_window: int) -> str | None:
+    """Returns why a notification may not be sent at `t`, or None if it may.
 
     Args:
         state: Current bookkeeping for the alert.
         t: Aware time in the configured timezone.
         window: Delivery window; None means the whole day.
         max_per_window: Cap on sends per window day.
+
+    Returns:
+        A one-line reason, or None.
     """
-    if window_bounds(t, window) is None:
-        return False
+    if window is not None and window_bounds(t, window) is None:
+        if window.days is not None and t.weekday() not in window.days:
+            return f"not on {t:%A}"
+        return f"outside window {window.start:%H:%M}–{window.end:%H:%M}"  # noqa: RUF001 - en dash for a time range
 
     state = _today(state, t)
     if state.sent >= max_per_window:
-        return False
+        return f"budget used: {state.sent} of {max_per_window} today"
 
-    return state.next_allowed is None or t >= state.next_allowed
+    if state.next_allowed is not None and t < state.next_allowed:
+        return f"next allowed {state.next_allowed.astimezone(t.tzinfo):%H:%M}"
+
+    return None
 
 
 def record(

@@ -67,7 +67,12 @@ def main(token_file: pathlib.Path, out: pathlib.Path) -> None:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+
+    out_dir = "metra-probe-out"
+    if len(sys.argv) > 2:
+        out_dir = sys.argv[2]
+
     try:
-        main(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else "metra-probe-out"))
+        main(pathlib.Path(sys.argv[1]), pathlib.Path(out_dir))
     except (OSError, IndexError, message.SourceError) as exc:
         sys.exit(f"probe failed: {exc}")

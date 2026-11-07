@@ -9,15 +9,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-- `loop.run`: loads limiter state, builds sources (`sources.build_source`), runs one `poll_forever` task per source in a `TaskGroup`; each task calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
-- Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Alert]`).
-- Delivery: `loop.deliver` → `limiter.allowed` → `targets/ntfy.py` → `limiter.record`. State key `(source_name, alert.key)`, persisted by `state.py`.
-- `loop.deliver` runs only after a successful poll; it deletes state for that source's keys missing from the poll, so a cleared event's next match starts a fresh budget.
-- `alert.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
+- `loop.run`: loads limiter state, builds sources (`sources.build_source`), runs one `poll_forever` task per source plus the health server in a `TaskGroup`; each poll task calls `start()` then polls. One `httpx.AsyncClient` per source (separate cookie jars) plus one for targets. Shared: the `states` dict, the health monitor.
+- HTTP: `web.serve` runs a Starlette app on uvicorn with uvicorn's signal capture disabled (courier owns SIGTERM/SIGINT); bind failure → `web.ServeError` → process exits. `health.app` (`/healthz`, `/readyz`, `/metrics`) on `health_port`.
+- Source contract: `message.Source` protocol (`start`, `poll(now) -> list[Check]`): a `Check` per configured event, matched or not, each with a one-line `reason`.
+- Delivery: `loop.deliver` → `limiter.blocked` → `targets/ntfy.py` → `limiter.record`; logs every decision with its reason (held and unmatched at DEBUG). State key `(source_name, check.key)`, persisted by `state.py`.
+- `loop.deliver` runs only after a successful poll; it deletes state for that source's keys that did not match, so a cleared event's next match starts a fresh budget.
+- `check.key` comes from `message.event_keys`; changing its format resets every rate-limit budget.
 - Source package layout (`sources/fi`, `sources/metra`):
   - `settings.py`: pydantic models, events are a discriminated union on `type`
   - `client.py`: upstream HTTP and parsing
-  - `events.py`: pure evaluators, status + event → `Message | None`
+  - `events.py`: pure evaluators, status + event → `(Message | None, reason)`
   - `__init__.py`: the `*Source` class
 - Metrics: shared ones (`source`/`target` label) in `metrics.py`; ones only one source or target produces in that package's `client.py`, on `metrics.REGISTRY`.
 - New source: add to `SourceConfig` and the `match` in `sources/__init__.py`.

@@ -1,14 +1,16 @@
 """Poll loop: one task per source, delivering alerts through rate-limited targets."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 import contextlib
 import dataclasses
 import datetime
 import logging
 import signal
+from typing import Any
 
 import httpx
+from starlette import types as asgi_types
 
 from courier import health
 from courier import limiter
@@ -33,21 +35,22 @@ async def _wait(stop: asyncio.Event, seconds: float) -> None:
 
 async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-poll state
     source_name: str,
-    alerts: list[message.Alert],
+    checks: list[message.Check],
     targets: dict[str, ntfy.NtfyTarget],
     http: httpx.AsyncClient,
     states: States,
     now: datetime.datetime,
 ) -> bool:
-    """Sends the alerts the limiter allows, recording each successful send in `states`.
+    """Sends the matched checks the limiter allows, recording each successful send in `states`.
 
-    Failed sends are logged, not raised, and do not stop the remaining alerts. Call only
-    after a successful poll: state for this source's keys missing from `alerts` is deleted,
-    so the next match of a cleared event starts a fresh budget.
+    Logs every decision: sent and failed at INFO and ERROR, held and unmatched at DEBUG.
+    Failed sends do not stop the remaining checks. Call only after a successful poll:
+    state for this source's keys that did not match is deleted, so the next match of a
+    cleared event starts a fresh budget.
 
     Args:
         source_name: Configured source name; first half of the state key.
-        alerts: Alerts from this poll.
+        checks: Checks from this poll.
         targets: Delivery targets by name.
         http: HTTP client for ntfy.
         states: Limiter state; mutated in place.
@@ -56,38 +59,46 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
     Returns:
         Whether `states` changed.
     """
+    still_matching = set()
     sent = False
 
-    for alert in alerts:
-        event = alert.event
+    for check in checks:
+        matched_message = check.message
+        if matched_message is None:
+            log.debug("%s/%s no match: %s", source_name, check.key, check.reason)
+            continue
+
+        still_matching.add((source_name, check.key))
+        event = check.event
         target = targets[event.target]
-        key = (source_name, alert.key)
+        key = (source_name, check.key)
         current = states.get(key, limiter.LimiterState())
 
-        if not limiter.allowed(current, now, target.window, event.max_per_window):
-            log.debug("%s/%s matched but limited", source_name, alert.key)
+        held = limiter.blocked(current, now, target.window, event.max_per_window)
+        if held is not None:
+            log.debug("%s/%s matched (%s), held: %s", source_name, check.key, check.reason, held)
             metrics.NOTIFICATIONS.labels(source_name, event.target, "limited").inc()
             continue
 
-        msg = dataclasses.replace(alert.message, priority=event.priority or alert.message.priority)
+        prioritized = dataclasses.replace(matched_message, priority=event.priority or matched_message.priority)
         try:
-            await ntfy.send_ntfy(http, target, msg)
+            await ntfy.send_ntfy(http, target, prioritized)
         except ntfy.NotifyError as exc:
-            log.error("notify %s for %s/%s failed: %s", event.target, source_name, alert.key, exc)
+            log.error("notify %s for %s/%s failed: %s", event.target, source_name, check.key, exc)
             metrics.NOTIFICATIONS.labels(source_name, event.target, "failed").inc()
             continue
         except Exception:  # one buggy alert must not drop the rest
-            log.exception("notify %s for %s/%s crashed", event.target, source_name, alert.key)
+            log.exception("notify %s for %s/%s crashed", event.target, source_name, check.key)
             metrics.NOTIFICATIONS.labels(source_name, event.target, "failed").inc()
             continue
 
-        log.info("sent %s/%s to %s", source_name, alert.key, event.target)
+        log.info("%s/%s matched (%s), sent to %s", source_name, check.key, check.reason, event.target)
         metrics.NOTIFICATIONS.labels(source_name, event.target, "sent").inc()
         states[key] = limiter.record(current, now, target.window, event.max_per_window)
         sent = True
 
-    matching = {(source_name, a.key) for a in alerts}
-    cleared = [key for key in states if key[0] == source_name and key not in matching]
+    # only matched checks keep state; an unmatched one must let its budget reset
+    cleared = [key for key in states if key[0] == source_name and key not in still_matching]
     for key in cleared:
         del states[key]
 
@@ -105,6 +116,38 @@ def _save(cfg: settings.Settings, states: States, now: datetime.datetime) -> Non
 
 class _StartError(Exception):
     """A source cannot start: its credentials or configuration are wrong."""
+
+
+type PollForever = Callable[[str, message.Source, httpx.AsyncClient], Coroutine[Any, Any, None]]
+
+
+async def _run_tasks(
+    cfg: settings.Settings, stop: asyncio.Event, health_app: asgi_types.ASGIApp, poll_forever: PollForever
+) -> None:
+    """Runs the health server and one poll task per source until all finish.
+
+    Raises:
+        SystemExit: A source could not start, or the health server could not bind its port.
+    """
+    async with contextlib.AsyncExitStack() as stack:
+        notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
+
+        # a client per source, so login sessions (cookies) never mix between sources
+        built = {
+            name: sources.build_source(
+                name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
+            )
+            for name, src in cfg.sources.items()
+        }
+
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                # must be reachable by Kubernetes probes
+                task_group.create_task(web.serve(health_app, "0.0.0.0", cfg.health_port, stop))  # noqa: S104
+                for name, source in built.items():
+                    task_group.create_task(poll_forever(name, source, notify_http))
+        except* (_StartError, web.ServeError) as errors:
+            raise SystemExit(str(errors.exceptions[0])) from None
 
 
 async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
@@ -134,11 +177,14 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
 
         while not stop.is_set():
             now = datetime.datetime.now(cfg.timezone)
+            phase = "start"
+
             try:
                 if not started:
                     await source.start()
                     started = True
-                alerts = await source.poll(now)
+                phase = "poll"
+                checks = await source.poll(now)
             except (message.SourceAuthError, message.SourceConfigError) as exc:
                 if not started:
                     raise _StartError(f"{name}: start failed: {exc}") from exc
@@ -148,10 +194,11 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
                 metrics.POLLS.labels(name, "error").inc()
                 return
             except (message.SourceError, httpx.HTTPError, ValueError) as exc:
-                log.error("%s %s failed: %s", name, "poll" if started else "start", exc)
+                # some httpx timeouts have no message
+                log.error("%s %s failed: %s", name, phase, str(exc) or type(exc).__name__)
                 metrics.POLLS.labels(name, "error").inc()
             else:
-                if await deliver(name, alerts, cfg.targets, http, states, now):
+                if await deliver(name, checks, cfg.targets, http, states, now):
                     _save(cfg, states, now)
 
                 monitor.mark_ok(name)
@@ -160,24 +207,6 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
 
             await wait(stop, intervals[name])
 
-    async with contextlib.AsyncExitStack() as stack:
-        notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
-
-        # a client per source, so login sessions (cookies) never mix between sources
-        built = {
-            name: sources.build_source(
-                name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
-            )
-            for name, src in cfg.sources.items()
-        }
-
-        try:
-            async with asyncio.TaskGroup() as task_group:
-                # must be reachable by Kubernetes probes
-                task_group.create_task(web.serve(health.app(monitor), "0.0.0.0", cfg.health_port, stop))  # noqa: S104
-                for name, source in built.items():
-                    task_group.create_task(poll_forever(name, source, notify_http))
-        except* (_StartError, web.ServeError) as errors:
-            raise SystemExit(str(errors.exceptions[0])) from None
+    await _run_tasks(cfg, stop, health.app(monitor), poll_forever)
 
     log.info("stopped")
