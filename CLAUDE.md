@@ -33,6 +33,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Google Python Style Guide, Google docstrings.
 - Import modules, not names (`from courier import limiter` → `limiter.blocked`). No relative imports.
 - Blank line between logical steps of a function body (setup, guards, main work, return). No dense blocks.
+- No conditional expressions (`x if c else y`); use an if statement. No generator, `any`/`all` or `next(...)` with a compound condition; use a loop. If ruff objects (PLR0915, PERF401), extract a helper rather than repacking.
+- Descriptive names, no single letters (`train`, not `t`), tests included.
 - Tests: pytest + pytest-asyncio; upstream fixtures in `tests/fixtures/`.
 
 ## Documentation and comments

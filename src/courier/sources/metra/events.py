@@ -33,13 +33,18 @@ def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: s
     Returns:
         Matching trip updates, by schedule trip id or by parsed trip id.
     """
-    ids = schedule.trips.get((line, number), frozenset())
-    return [
-        e.trip_update
-        for e in feed.entity
-        if e.HasField("trip_update")
-        and (e.trip_update.trip.trip_id in ids or gtfs.parse_trip_id(e.trip_update.trip.trip_id) == (line, number))
-    ]
+    schedule_trip_ids = schedule.trips.get((line, number), frozenset())
+    trips = []
+
+    for entity in feed.entity:
+        if not entity.HasField("trip_update"):
+            continue
+
+        trip_id = entity.trip_update.trip.trip_id
+        if trip_id in schedule_trip_ids or gtfs.parse_trip_id(trip_id) == (line, number):
+            trips.append(entity.trip_update)
+
+    return trips
 
 
 def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input explicitly
@@ -74,16 +79,18 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
         return None, f"trip runs {start:%a %b %d}, not today"
 
     # the next stop, not the worst one: a train can make up time it lost earlier
-    next_stop = next(
-        (
-            update
-            for update in tu.stop_time_update
-            if update.schedule_relationship != SKIPPED
-            and (update.arrival.time or update.departure.time)
-            and (tu.trip.trip_id, update.stop_sequence) in schedule.arrivals
-        ),
-        None,
-    )
+    next_stop = None
+    for update in tu.stop_time_update:
+        if update.schedule_relationship == SKIPPED:
+            continue
+        if not update.arrival.time and not update.departure.time:
+            continue
+        if (tu.trip.trip_id, update.stop_sequence) not in schedule.arrivals:
+            continue
+
+        next_stop = update
+        break
+
     if next_stop is None:
         return None, "no upcoming stop in schedule"
 
@@ -124,10 +131,11 @@ def cancel_message(tu: TripUpdate, line: str, number: str, today: datetime.date)
     if start < today:
         return None, f"trip ran {start:%a %b %d}"
 
-    cancelled = tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED or (
-        bool(tu.stop_time_update) and all(update.schedule_relationship == SKIPPED for update in tu.stop_time_update)
-    )
-    if not cancelled:
+    trip_cancelled = tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED
+    skipped = [update.schedule_relationship == SKIPPED for update in tu.stop_time_update]
+    every_stop_skipped = bool(skipped) and all(skipped)
+
+    if not trip_cancelled and not every_stop_skipped:
         return None, "running"
 
     cancellation = message.Message(
@@ -152,34 +160,38 @@ def alert_messages(feed: FeedMessage, line_id: str) -> list[tuple[str, message.M
     """
     out = []
 
-    for e in feed.entity:
-        if not e.HasField("alert") or not any(i.route_id == line_id for i in e.alert.informed_entity):
+    for entity in feed.entity:
+        if not entity.HasField("alert"):
             continue
 
-        a = e.alert
+        alert = entity.alert
+        route_ids = [informed.route_id for informed in alert.informed_entity]
+        if line_id not in route_ids:
+            continue
+
         title = "Metra alert"
-        if a.header_text.translation:
-            title = a.header_text.translation[0].text
+        if alert.header_text.translation:
+            title = alert.header_text.translation[0].text
 
         body = ""
-        if a.description_text.translation:
-            body = a.description_text.translation[0].text
-        if a.url.translation:
-            body += "\n\n" + a.url.translation[0].text
+        if alert.description_text.translation:
+            body = alert.description_text.translation[0].text
+        if alert.url.translation:
+            body += "\n\n" + alert.url.translation[0].text
 
         priority = "default"
-        if a.severity_level == gtfs_realtime_pb2.Alert.SEVERE:
+        if alert.severity_level == gtfs_realtime_pb2.Alert.SEVERE:
             priority = "high"
 
         out.append(
             (
-                e.id,
+                entity.id,
                 message.Message(
                     title=title,
                     body=body,
                     priority=priority,
                     tags="warning",
-                    sid=e.id,
+                    sid=entity.id,
                 ),
             )
         )

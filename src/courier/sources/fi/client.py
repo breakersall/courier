@@ -134,7 +134,8 @@ def _is_auth_failure(resp: httpx.Response) -> bool:
 
     try:
         errors = resp.json().get("errors") or []
-        return any("unauth" in str(e.get("message", "")).lower() for e in errors)
+        messages = [str(error.get("message", "")).lower() for error in errors]
+        return any("unauth" in error_message for error_message in messages)
     except ValueError, AttributeError:
         return False
 

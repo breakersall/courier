@@ -40,18 +40,18 @@ def parse_trip_id(trip_id: str) -> tuple[str, str] | None:
     Returns:
         The (line, number) pair, or None if the id does not match.
     """
-    m = _TRIP_ID.match(trip_id)
+    match = _TRIP_ID.match(trip_id)
 
-    if m is None:
+    if match is None:
         return None
 
-    return (m["line"], m["number"])
+    return (match["line"], match["number"])
 
 
 def gtfs_seconds(value: str) -> int:
     """Converts a GTFS ``HH:MM:SS`` time (hours may exceed 24) to seconds."""
-    h, m, s = value.split(":")
-    return int(h) * 3600 + int(m) * 60 + int(s)
+    hours, minutes, seconds = value.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
 
 
 def scheduled_at(start_date: datetime.date, seconds: int) -> datetime.datetime:
@@ -85,23 +85,30 @@ def load_schedule(zip_bytes: bytes, wanted: set[tuple[str, str]]) -> Schedule:
     """
 
     def rows(name: str) -> Iterator[dict[str, str]]:
-        with zf.open(name) as f:
-            yield from csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig"), skipinitialspace=True)
+        with archive.open(name) as csv_file:
+            yield from csv.DictReader(io.TextIOWrapper(csv_file, encoding="utf-8-sig"), skipinitialspace=True)
 
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
             trips: dict[tuple[str, str], set[str]] = {}
             for row in rows("trips.txt"):
-                if key := parse_trip_id(row["trip_id"]):
-                    trips.setdefault(key, set()).add(row["trip_id"])
+                train = parse_trip_id(row["trip_id"])
+                if train is not None:
+                    trips.setdefault(train, set()).add(row["trip_id"])
+
             lines = frozenset(row["route_id"] for row in rows("routes.txt"))
             stop_names = {row["stop_id"]: row["stop_name"] for row in rows("stops.txt")}
-            wanted_ids = set().union(*(trips.get(k, set()) for k in wanted))
-            arrivals = {
-                (row["trip_id"], int(row["stop_sequence"])): gtfs_seconds(row["arrival_time"])
-                for row in rows("stop_times.txt")
-                if row["trip_id"] in wanted_ids
-            }
-    except (zipfile.BadZipFile, KeyError, TypeError, ValueError) as e:
-        raise ValueError(f"invalid GTFS schedule: {e}") from e
-    return Schedule({k: frozenset(v) for k, v in trips.items()}, lines, stop_names, arrivals)
+
+            wanted_trip_ids: set[str] = set()
+            for train in wanted:
+                wanted_trip_ids |= trips.get(train, set())
+
+            arrivals = {}
+            for row in rows("stop_times.txt"):
+                if row["trip_id"] in wanted_trip_ids:
+                    arrivals[(row["trip_id"], int(row["stop_sequence"]))] = gtfs_seconds(row["arrival_time"])
+    except (zipfile.BadZipFile, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid GTFS schedule: {exc}") from exc
+
+    trip_ids = {train: frozenset(ids) for train, ids in trips.items()}
+    return Schedule(trip_ids, lines, stop_names, arrivals)

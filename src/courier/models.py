@@ -4,6 +4,7 @@ Secrets may be given inline (`x`) or read from a file (`x_file`), which is how
 Kubernetes Secrets are mounted.
 """
 
+import collections
 import datetime
 import pathlib
 from typing import Any, Literal, Self
@@ -49,12 +50,20 @@ def resolve_secret(data: Any, key: str, *, required: bool) -> Any:
         if not secret:
             raise ValueError(f"{file_key} {path} is empty")
 
-        data = {k: v for k, v in data.items() if k != file_key} | {key: secret}
+        data = dict(data)
+        del data[file_key]
+        data[key] = secret
 
     if required and key not in data:
         raise ValueError(f"{key!r} or {file_key!r} is required")
 
     return data
+
+
+def duplicates(names: list[str]) -> list[str]:
+    """Returns the sorted names that appear more than once."""
+    counts = collections.Counter(names)
+    return sorted(name for name, count in counts.items() if count > 1)
 
 
 class Model(pydantic.BaseModel):
@@ -87,12 +96,12 @@ class Window(Model):
         if not value:
             raise ValueError("days must not be empty; omit it for every day")
 
-        names = [str(d).lower() for d in value]
-        unknown = [d for d in names if d not in _DAYS]
+        names = [str(day).lower() for day in value]
+        unknown = [name for name in names if name not in _DAYS]
         if unknown:
             raise ValueError(f"unknown days {unknown}; use {', '.join(_DAYS)}")
 
-        return frozenset(_DAYS.index(d) for d in names)
+        return frozenset(_DAYS.index(name) for name in names)
 
     @pydantic.model_validator(mode="after")
     def _ordered(self) -> Self:

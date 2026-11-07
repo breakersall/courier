@@ -33,7 +33,12 @@ class Health:
     def stale(self) -> list[str]:
         """Returns sorted names of sources with no success within 3x their interval."""
         now = self._clock()
-        return sorted(name for name, limit in self._limits.items() if now - self._last_ok[name] > limit)
+        stale = []
+        for name, limit in self._limits.items():
+            if now - self._last_ok[name] > limit:
+                stale.append(name)
+
+        return sorted(stale)
 
 
 def app(health: Health, lifespan: types.Lifespan[applications.Starlette] | None = None) -> applications.Starlette:

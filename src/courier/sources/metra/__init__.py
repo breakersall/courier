@@ -48,13 +48,13 @@ class MetraSource:
     async def _load(self) -> gtfs.Schedule:
         """Fetches published and schedule, replacing both only if all succeed."""
         published = await self._client.fetch_published()
-        wanted = {(t.line, t.number) for t in self._settings.trains}
+        wanted = {(train.line, train.number) for train in self._settings.trains}
         schedule = await asyncio.to_thread(gtfs.load_schedule, await self._client.fetch_schedule(), wanted)
         self._published, self._schedule = published, schedule
         return schedule
 
     def _missing_trains(self, schedule: gtfs.Schedule) -> list[settings.Train]:
-        return [t for t in self._settings.trains if (t.line, t.number) not in schedule.trips]
+        return [train for train in self._settings.trains if (train.line, train.number) not in schedule.trips]
 
     async def start(self) -> None:
         """Loads the schedule and verifies every configured train and line exists.
@@ -67,10 +67,15 @@ class MetraSource:
         self._last_check = self._clock()
 
         problems = []
-        for t in self._missing_trains(schedule):
-            numbers = sorted((n for line, n in schedule.trips if line == t.line), key=int)
-            problems.append(f"{t.line} {t.number} (available on {t.line}: {', '.join(numbers) or '(none)'})")
-        bad_lines = [x.id for x in self._settings.lines if x.id not in schedule.lines]
+        for train in self._missing_trains(schedule):
+            numbers = [number for line, number in schedule.trips if line == train.line]
+            available = "(none)"
+            if numbers:
+                available = ", ".join(sorted(numbers, key=int))
+
+            problems.append(f"{train.line} {train.number} (available on {train.line}: {available})")
+
+        bad_lines = [line.id for line in self._settings.lines if line.id not in schedule.lines]
         if bad_lines:
             problems.append(f"lines {', '.join(bad_lines)} (available: {', '.join(sorted(schedule.lines))})")
 
@@ -84,11 +89,11 @@ class MetraSource:
         self._last_check = self._clock()
         try:
             if await self._client.fetch_published() != self._published:
-                for t in self._missing_trains(await self._load()):
+                for train in self._missing_trains(await self._load()):
                     log.warning(
                         "Metra train %s %s is missing from the new schedule; no alerts until it returns",
-                        t.line,
-                        t.number,
+                        train.line,
+                        train.number,
                     )
         except (message.SourceError, httpx.HTTPError, ValueError) as exc:
             log.error("Metra schedule refresh failed, keeping old schedule: %s", exc)
