@@ -39,7 +39,7 @@ To see why an event did or did not notify, run with `--log-level DEBUG` (see [Lo
 > [!NOTE]
 > Fi has no public API. This source uses the same API as the Fi app, which can change without notice.
 
-At startup, the source verifies that each configured collar exists on the Fi account. If one does not, it exits and lists the available names.
+At startup, the source verifies that each configured collar exists on the Fi account. If one does not, the source stops and logs the available names.
 
 | Type | Fires When |
 |---|---|
@@ -116,7 +116,9 @@ INFO courier: dogs/Rex:lost_mode:phone matched (mode is lost dog), sent to phone
 
 `GET /readyz` returns `200` if every source has had a successful poll within the last 3 × its poll interval. Otherwise it returns `503` and names the failing sources.
 
-An upstream outage does not stop the other sources. A source that cannot reach its upstream at startup retries every poll interval. If a source's credentials are rejected at startup, or a configured collar, train, or line does not exist, the process exits. If credentials are rejected later, that source stops until the next restart, so repeated logins cannot lock the account.
+The Docker image uses `/readyz` on port 8080 as its `HEALTHCHECK`, so `docker ps` shows the container as unhealthy while a source is failing.
+
+Each source runs independently, so a failure in one never stops the others. A source that cannot reach its upstream, or hits an unexpected error, logs it and retries every poll interval. If a source's credentials are rejected, or a configured collar, train, or line does not exist, that source stops until the next restart, so repeated logins cannot lock the account; `/readyz` then reports it. The process exits only if the config file is invalid or the health port is in use.
 
 ### Metrics
 

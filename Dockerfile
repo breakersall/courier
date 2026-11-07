@@ -11,5 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY --from=build /app/.venv /app/.venv
 USER 10001
 EXPOSE 8080
+# unhealthy while a source is stopped or failing; assumes the default health_port
+HEALTHCHECK CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5)"]
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "courier"]
 CMD ["--config", "/config/config.yaml"]

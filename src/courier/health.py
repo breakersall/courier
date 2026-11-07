@@ -8,6 +8,7 @@ from starlette import applications
 from starlette import requests
 from starlette import responses
 from starlette import routing
+from starlette import types
 
 from courier import metrics
 
@@ -35,7 +36,7 @@ class Health:
         return sorted(name for name, limit in self._limits.items() if now - self._last_ok[name] > limit)
 
 
-def app(health: Health) -> applications.Starlette:
+def app(health: Health, lifespan: types.Lifespan[applications.Starlette] | None = None) -> applications.Starlette:
     """Builds the app serving /healthz, /readyz, and /metrics.
 
     /healthz returns 200 while the event loop serves requests. /readyz returns 200, or 503
@@ -43,6 +44,7 @@ def app(health: Health) -> applications.Starlette:
 
     Args:
         health: Health tracker to report.
+        lifespan: Runs while the app serves; the service polls its sources in it.
 
     Returns:
         The ASGI app.
@@ -63,9 +65,10 @@ def app(health: Health) -> applications.Starlette:
         return responses.Response(metrics.render(), media_type=prometheus_client.CONTENT_TYPE_LATEST)
 
     return applications.Starlette(
+        lifespan=lifespan,
         routes=[
             routing.Route("/healthz", healthz),
             routing.Route("/readyz", readyz),
             routing.Route("/metrics", prometheus_metrics),
-        ]
+        ],
     )

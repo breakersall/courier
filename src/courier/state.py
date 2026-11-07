@@ -1,4 +1,4 @@
-"""Optional JSON persistence of limiter state, keyed by (source name, alert key)."""
+"""Optional JSON persistence of limiter state, keyed by (source name, check key)."""
 
 import datetime
 import json

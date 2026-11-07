@@ -12,7 +12,7 @@ from courier import models
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class LimiterState:
-    """Rate-limit bookkeeping for one (source name, alert key) pair.
+    """Rate-limit bookkeeping for one (source name, check key) pair.
 
     Attributes:
         window_date: Local date the counters apply to.
@@ -61,7 +61,7 @@ def blocked(state: LimiterState, t: datetime.datetime, window: models.Window | N
     """Returns why a notification may not be sent at `t`, or None if it may.
 
     Args:
-        state: Current bookkeeping for the alert.
+        state: Current bookkeeping for the event.
         t: Aware time in the configured timezone.
         window: Delivery window; None means the whole day.
         max_per_window: Cap on sends per window day.
@@ -93,7 +93,7 @@ def record(
     the remaining sends.
 
     Args:
-        state: Current bookkeeping for the alert.
+        state: Current bookkeeping for the event.
         t: Aware time of the send, in the configured timezone.
         window: Delivery window; None means the whole day.
         max_per_window: Cap on sends per window day.

@@ -1,16 +1,16 @@
-"""Poll loop: one task per source, delivering alerts through rate-limited targets."""
+"""The service: one independent poll task per source, sending notifications through rate-limited targets."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable
 import contextlib
 import dataclasses
 import datetime
+import functools
 import logging
-import signal
-from typing import Any
 
 import httpx
-from starlette import types as asgi_types
+from starlette import applications
+import uvicorn
 
 from courier import health
 from courier import limiter
@@ -19,7 +19,6 @@ from courier import metrics
 from courier import settings
 from courier import sources
 from courier import state as state_store
-from courier import web
 from courier.targets import ntfy
 
 log = logging.getLogger("courier")
@@ -87,7 +86,7 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
             log.error("notify %s for %s/%s failed: %s", event.target, source_name, check.key, exc)
             metrics.NOTIFICATIONS.labels(source_name, event.target, "failed").inc()
             continue
-        except Exception:  # one buggy alert must not drop the rest
+        except Exception:  # a bug sending one notification must not drop the rest
             log.exception("notify %s for %s/%s crashed", event.target, source_name, check.key)
             metrics.NOTIFICATIONS.labels(source_name, event.target, "failed").inc()
             continue
@@ -114,65 +113,20 @@ def _save(cfg: settings.Settings, states: States, now: datetime.datetime) -> Non
         log.error("cannot write state file %s: %s", cfg.state_file, exc)
 
 
-class _StartError(Exception):
-    """A source cannot start: its credentials or configuration are wrong."""
-
-
-type PollForever = Callable[[str, message.Source, httpx.AsyncClient], Coroutine[Any, Any, None]]
-
-
-async def _run_tasks(
-    cfg: settings.Settings, stop: asyncio.Event, health_app: asgi_types.ASGIApp, poll_forever: PollForever
-) -> None:
-    """Runs the health server and one poll task per source until all finish.
-
-    Raises:
-        SystemExit: A source could not start, or the health server could not bind its port.
-    """
-    async with contextlib.AsyncExitStack() as stack:
-        notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
-
-        # a client per source, so login sessions (cookies) never mix between sources
-        built = {
-            name: sources.build_source(
-                name, src, await stack.enter_async_context(httpx.AsyncClient(timeout=30)), cfg.timezone
-            )
-            for name, src in cfg.sources.items()
-        }
-
-        try:
-            async with asyncio.TaskGroup() as task_group:
-                # must be reachable by Kubernetes probes
-                task_group.create_task(web.serve(health_app, "0.0.0.0", cfg.health_port, stop))  # noqa: S104
-                for name, source in built.items():
-                    task_group.create_task(poll_forever(name, source, notify_http))
-        except* (_StartError, web.ServeError) as errors:
-            raise SystemExit(str(errors.exceptions[0])) from None
-
-
-async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
-    """Runs every source's poll loop until SIGTERM or SIGINT.
-
-    Each source starts in its own task. A source that cannot reach its upstream retries
-    every poll interval while the others run.
-
-    Args:
-        cfg: Service settings.
-        wait: Waits for `stop` or the timeout; injectable for tests.
-
-    Raises:
-        SystemExit: A source's credentials or configuration were rejected at start.
-    """
+@contextlib.asynccontextmanager
+async def _run_sources(
+    cfg: settings.Settings,
+    monitor: health.Health,
+    intervals: dict[str, int],
+    wait: Wait,
+    _app: applications.Starlette,
+) -> AsyncGenerator[None]:
+    """Polls every source in its own task until the context exits; the app's lifespan."""
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
-
     states = state_store.load_state(cfg.state_file, datetime.datetime.now(cfg.timezone).date())
-    intervals = {name: src.poll_interval or cfg.poll_interval for name, src in cfg.sources.items()}
-    monitor = health.Health(intervals)
 
-    async def poll_forever(name: str, source: message.Source, http: httpx.AsyncClient) -> None:
+    async def poll_forever(name: str, source: message.Source, notify_http: httpx.AsyncClient) -> None:
+        """Polls one source until `stop`; never raises, so one source cannot stop the others."""
         started = False
 
         while not stop.is_set():
@@ -183,30 +137,80 @@ async def run(cfg: settings.Settings, wait: Wait = _wait) -> None:
                 if not started:
                     await source.start()
                     started = True
+
                 phase = "poll"
                 checks = await source.poll(now)
+                if await deliver(name, checks, cfg.targets, notify_http, states, now):
+                    _save(cfg, states, now)
             except (message.SourceAuthError, message.SourceConfigError) as exc:
-                if not started:
-                    raise _StartError(f"{name}: start failed: {exc}") from exc
-
-                # stop only this source; retrying every poll risks account lockout
-                log.error("%s credentials rejected, polling stopped until restart: %s", name, exc)
+                # retrying risks account lockout, and the config will not fix itself
+                log.error("%s %s failed, polling stopped until restart: %s", name, phase, exc)
                 metrics.POLLS.labels(name, "error").inc()
                 return
             except (message.SourceError, httpx.HTTPError, ValueError) as exc:
                 # some httpx timeouts have no message
                 log.error("%s %s failed: %s", name, phase, str(exc) or type(exc).__name__)
                 metrics.POLLS.labels(name, "error").inc()
+            except Exception:  # a bug in one source must not stop the others
+                log.exception("%s %s crashed", name, phase)
+                metrics.POLLS.labels(name, "error").inc()
             else:
-                if await deliver(name, checks, cfg.targets, http, states, now):
-                    _save(cfg, states, now)
-
                 monitor.mark_ok(name)
                 metrics.POLLS.labels(name, "ok").inc()
                 metrics.LAST_SUCCESS.labels(name).set_to_current_time()
 
             await wait(stop, intervals[name])
 
-    await _run_tasks(cfg, stop, health.app(monitor), poll_forever)
+    async with contextlib.AsyncExitStack() as stack:
+        notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
+        tasks = []
+
+        for name, source_cfg in cfg.sources.items():
+            # a client per source, so login sessions (cookies) never mix between sources
+            source_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
+            source = sources.build_source(name, source_cfg, source_http, cfg.timezone)
+            tasks.append(asyncio.create_task(poll_forever(name, source, notify_http)))
+
+        try:
+            yield
+        finally:
+            stop.set()
+            await asyncio.gather(*tasks)
 
     log.info("stopped")
+
+
+def app(cfg: settings.Settings, wait: Wait = _wait) -> applications.Starlette:
+    """Builds the service: the health endpoints, with every source polling while the app runs.
+
+    Args:
+        cfg: Service settings.
+        wait: Waits for the stop event or the timeout; injectable for tests.
+
+    Returns:
+        The ASGI app.
+    """
+    intervals = {name: src.poll_interval or cfg.poll_interval for name, src in cfg.sources.items()}
+    monitor = health.Health(intervals)
+
+    return health.app(monitor, functools.partial(_run_sources, cfg, monitor, intervals, wait))
+
+
+def run(cfg: settings.Settings) -> None:
+    """Serves the health endpoints and polls every source until SIGTERM or SIGINT.
+
+    Args:
+        cfg: Service settings.
+
+    Raises:
+        SystemExit: The health port could not be bound.
+    """
+    uvicorn.run(
+        app(cfg),
+        host="0.0.0.0",  # noqa: S104 - must be reachable by Kubernetes probes
+        port=cfg.health_port,
+        log_config=None,
+        access_log=False,
+        lifespan="on",  # "auto" would keep serving if polling failed to start
+        timeout_graceful_shutdown=5,
+    )
