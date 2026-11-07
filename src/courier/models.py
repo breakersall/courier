@@ -4,7 +4,6 @@ Secrets may be given inline (`x`) or read from a file (`x_file`), which is how
 Kubernetes Secrets are mounted.
 """
 
-from collections.abc import Iterator
 import datetime
 import pathlib
 from typing import Any, Literal, Self
@@ -87,8 +86,6 @@ class Window(Model):
             return None
         if not value:
             raise ValueError("days must not be empty; omit it for every day")
-        if isinstance(value, str):
-            value = [value]
 
         names = [str(d).lower() for d in value]
         unknown = [d for d in names if d not in _DAYS]
@@ -128,11 +125,3 @@ class SourceSettings(Model):
     """
 
     poll_interval: int | None = pydantic.Field(default=None, ge=60)
-
-    def events(self) -> Iterator[EventBase]:
-        """Yields the events configured for this source.
-
-        Raises:
-            NotImplementedError: Subclasses must override this.
-        """
-        raise NotImplementedError

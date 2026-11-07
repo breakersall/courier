@@ -17,12 +17,6 @@ type StateKey = tuple[str, str]
 _ADAPTER = pydantic.TypeAdapter(limiter.LimiterState)
 
 
-def prune(state: dict[StateKey, limiter.LimiterState], today: datetime.date) -> None:
-    """Removes entries whose window date is unset or before `today` from `state`, in place."""
-    for key in [k for k, v in state.items() if v.window_date is None or v.window_date < today]:
-        del state[key]
-
-
 def load_state(path: pathlib.Path | None, today: datetime.date) -> dict[StateKey, limiter.LimiterState]:
     """Loads saved limiter state, ignoring an unreadable file.
 
@@ -42,12 +36,14 @@ def load_state(path: pathlib.Path | None, today: datetime.date) -> dict[StateKey
 
         for key, value in raw.items():
             name, event_id = json.loads(key)
-            state[(name, event_id)] = _ADAPTER.validate_python(value)
+            entry = _ADAPTER.validate_python(value)
+
+            # earlier days are spent budgets, and keys of removed sources would never clear
+            if entry.window_date is not None and entry.window_date >= today:
+                state[(name, event_id)] = entry
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         log.warning("ignoring unreadable state file %s: %r", path, exc)
         return {}
-
-    prune(state, today)
 
     return state
 

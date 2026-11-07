@@ -1,7 +1,7 @@
 """The service: one independent poll task per source, sending notifications through rate-limited targets."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 import contextlib
 import dataclasses
 import datetime
@@ -24,10 +24,10 @@ from courier.targets import ntfy
 log = logging.getLogger("courier")
 
 type States = dict[state_store.StateKey, limiter.LimiterState]
-type Wait = Callable[[asyncio.Event, float], Awaitable[None]]
 
 
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
+    """Waits `seconds` or until `stop` is set; replaced in tests."""
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(stop.wait(), seconds)
 
@@ -39,7 +39,7 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
     http: httpx.AsyncClient,
     states: States,
     now: datetime.datetime,
-) -> bool:
+) -> None:
     """Sends the matched checks the limiter allows, recording each successful send in `states`.
 
     Logs every decision: sent and failed at INFO and ERROR, held and unmatched at DEBUG.
@@ -54,12 +54,8 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
         http: HTTP client for ntfy.
         states: Limiter state; mutated in place.
         now: Current time in the configured timezone.
-
-    Returns:
-        Whether `states` changed.
     """
     still_matching = set()
-    sent = False
 
     for check in checks:
         matched_message = check.message
@@ -67,10 +63,10 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
             log.debug("%s/%s no match: %s", source_name, check.key, check.reason)
             continue
 
-        still_matching.add((source_name, check.key))
+        key = (source_name, check.key)
+        still_matching.add(key)
         event = check.event
         target = targets[event.target]
-        key = (source_name, check.key)
         current = states.get(key, limiter.LimiterState())
 
         held = limiter.blocked(current, now, target.window, event.max_per_window)
@@ -94,19 +90,14 @@ async def deliver(  # noqa: PLR0913, PLR0917 - each argument is separate per-pol
         log.info("%s/%s matched (%s), sent to %s", source_name, check.key, check.reason, event.target)
         metrics.NOTIFICATIONS.labels(source_name, event.target, "sent").inc()
         states[key] = limiter.record(current, now, target.window, event.max_per_window)
-        sent = True
 
     # only matched checks keep state; an unmatched one must let its budget reset
     cleared = [key for key in states if key[0] == source_name and key not in still_matching]
     for key in cleared:
         del states[key]
 
-    return sent or bool(cleared)
 
-
-def _save(cfg: settings.Settings, states: States, now: datetime.datetime) -> None:
-    state_store.prune(states, now.date())
-
+def _save(cfg: settings.Settings, states: States) -> None:
     try:
         state_store.save_state(cfg.state_file, states)
     except OSError as exc:  # keep running on in-memory state rather than crash-loop
@@ -118,7 +109,6 @@ async def _run_sources(
     cfg: settings.Settings,
     monitor: health.Health,
     intervals: dict[str, int],
-    wait: Wait,
     _app: applications.Starlette,
 ) -> AsyncGenerator[None]:
     """Polls every source in its own task until the context exits; the app's lifespan."""
@@ -140,8 +130,8 @@ async def _run_sources(
 
                 phase = "poll"
                 checks = await source.poll(now)
-                if await deliver(name, checks, cfg.targets, notify_http, states, now):
-                    _save(cfg, states, now)
+                await deliver(name, checks, cfg.targets, notify_http, states, now)
+                _save(cfg, states)
             except (message.SourceAuthError, message.SourceConfigError) as exc:
                 # retrying risks account lockout, and the config will not fix itself
                 log.error("%s %s failed, polling stopped until restart: %s", name, phase, exc)
@@ -159,7 +149,7 @@ async def _run_sources(
                 metrics.POLLS.labels(name, "ok").inc()
                 metrics.LAST_SUCCESS.labels(name).set_to_current_time()
 
-            await wait(stop, intervals[name])
+            await _wait(stop, intervals[name])
 
     async with contextlib.AsyncExitStack() as stack:
         notify_http = await stack.enter_async_context(httpx.AsyncClient(timeout=30))
@@ -180,12 +170,11 @@ async def _run_sources(
     log.info("stopped")
 
 
-def app(cfg: settings.Settings, wait: Wait = _wait) -> applications.Starlette:
+def app(cfg: settings.Settings) -> applications.Starlette:
     """Builds the service: the health endpoints, with every source polling while the app runs.
 
     Args:
         cfg: Service settings.
-        wait: Waits for the stop event or the timeout; injectable for tests.
 
     Returns:
         The ASGI app.
@@ -193,7 +182,7 @@ def app(cfg: settings.Settings, wait: Wait = _wait) -> applications.Starlette:
     intervals = {name: src.poll_interval or cfg.poll_interval for name, src in cfg.sources.items()}
     monitor = health.Health(intervals)
 
-    return health.app(monitor, functools.partial(_run_sources, cfg, monitor, intervals, wait))
+    return health.app(monitor, functools.partial(_run_sources, cfg, monitor, intervals))
 
 
 def run(cfg: settings.Settings) -> None:

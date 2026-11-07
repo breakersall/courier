@@ -22,14 +22,6 @@ STATUS_QUERY = (
 )
 
 
-class FiError(message.SourceError):
-    """The Fi API returned an error or an unexpected response."""
-
-
-class FiAuthError(FiError, message.SourceAuthError):
-    """Fi rejected the login or the session."""
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class PetStatus:
     """A collared pet's current status.
@@ -154,9 +146,6 @@ class FiClient:
         email: Account email.
         password: Account password.
         client: HTTP client to use; the caller owns its lifecycle.
-
-    Attributes:
-        pet_names: Names of all collared pets seen in the last successful fetch.
     """
 
     def __init__(self, email: str, password: str, client: httpx.AsyncClient) -> None:
@@ -164,13 +153,12 @@ class FiClient:
         self._password = password
         self._http = client
         self._logged_in = False
-        self.pet_names: set[str] = set()
 
     async def login(self) -> None:
         """Logs in; the session cookie is kept by the HTTP client.
 
         Raises:
-            FiAuthError: Fi rejected the credentials.
+            SourceAuthError: Fi rejected the credentials.
         """
         resp = await self._http.post(f"{BASE_URL}/auth/login", data={"email": self._email, "password": self._password})
 
@@ -180,7 +168,7 @@ class FiClient:
             body = {}
 
         if resp.is_error or not isinstance(body, dict) or "error" in body:
-            raise FiAuthError(f"Fi login failed (HTTP {resp.status_code})")
+            raise message.SourceAuthError(f"Fi login failed (HTTP {resp.status_code})")
 
         self._logged_in = True
         log.info("logged in to Fi")
@@ -188,15 +176,16 @@ class FiClient:
     async def _query(self) -> httpx.Response:
         return await self._http.get(f"{BASE_URL}/graphql", params={"query": STATUS_QUERY}, headers=GRAPHQL_HEADERS)
 
-    async def fetch_pets(self) -> list[PetStatus]:
+    async def fetch_pets(self) -> tuple[list[PetStatus], set[str]]:
         """Fetches status of all collared pets, logging in again once if the session expired.
 
         Returns:
-            Status of every collared pet whose device data parsed.
+            Status of every collared pet whose device data parsed, and the names of all
+            collared pets, including ones whose data did not parse.
 
         Raises:
-            FiAuthError: Login failed or the session was rejected after re-login.
-            FiError: Fi returned an error or an unexpected response shape.
+            SourceAuthError: Login failed or the session was rejected after re-login.
+            SourceError: Fi returned an error or an unexpected response shape.
             httpx.HTTPError: The request failed.
         """
         if not self._logged_in:
@@ -208,16 +197,16 @@ class FiClient:
             await self.login()
             resp = await self._query()
             if _is_auth_failure(resp):
-                raise FiAuthError("Fi rejected the session after re-login")
+                raise message.SourceAuthError("Fi rejected the session after re-login")
 
         resp.raise_for_status()
         try:
             body = resp.json()
             if body.get("errors"):
-                raise FiError(f"Fi GraphQL error: {body['errors'][0].get('message')}")
-            pets, names = parse_pets(body["data"]), pet_names(body["data"])
+                raise message.SourceError(f"Fi GraphQL error: {body['errors'][0].get('message')}")
+            pets = parse_pets(body["data"])
+            names = pet_names(body["data"])
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise FiError(f"unexpected Fi response shape: {exc!r}") from exc
+            raise message.SourceError(f"unexpected Fi response shape: {exc!r}") from exc
 
-        self.pet_names = names
-        return pets
+        return pets, names

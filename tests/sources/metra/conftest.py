@@ -1,18 +1,13 @@
 """Synthetic Metra GTFS zip fixtures."""
 
+from collections.abc import Callable
 import io
 import zipfile
 
 import pytest
 
-LINES = ["BNSF", "HC", "ME", "MD-N", "MD-W", "NCS", "RI", "SWS", "UP-N", "UP-NW", "UP-W"]
-STOP_TIMES_HEADER = (
-    "trip_id, arrival_time, departure_time, stop_id, stop_sequence, pickup_type, drop_off_type, "
-    "center_boarding, south_boarding, bikes_allowed, notice"
-)
 
-
-def make_gtfs_zip(trips: list[str], stop_times: list[str]) -> bytes:
+def _gtfs_zip(trips: list[str], stop_times: list[str]) -> bytes:
     """Build a GTFS zip using the real Metra header and spacing style.
 
     Args:
@@ -32,7 +27,10 @@ def make_gtfs_zip(trips: list[str], stop_times: list[str]) -> bytes:
                 "route_id, route_short_name, route_long_name, route_desc, agency_id, route_type, "
                 "route_color, route_text_color, route_url"
             ]
-            + [f"{x},  {x},  {x},  d,  METRA,  2,  000000,  FFFFFF,  u" for x in LINES]
+            + [
+                f"{x},  {x},  {x},  d,  METRA,  2,  000000,  FFFFFF,  u"
+                for x in ["BNSF", "HC", "ME", "MD-N", "MD-W", "NCS", "RI", "SWS", "UP-N", "UP-NW", "UP-W"]
+            ]
         ),
         "stops.txt": "\n".join(
             ["stop_id, stop_name, stop_desc, stop_lat, stop_lon, zone_id, stop_url, wheelchair_boarding"]
@@ -46,7 +44,13 @@ def make_gtfs_zip(trips: list[str], stop_times: list[str]) -> bytes:
                 ]
             ]
         ),
-        "stop_times.txt": "\n".join([STOP_TIMES_HEADER, *stop_times]),
+        "stop_times.txt": "\n".join(
+            [
+                "trip_id, arrival_time, departure_time, stop_id, stop_sequence, pickup_type, drop_off_type, "
+                "center_boarding, south_boarding, bikes_allowed, notice",
+                *stop_times,
+            ]
+        ),
     }
 
     buf = io.BytesIO()
@@ -55,6 +59,12 @@ def make_gtfs_zip(trips: list[str], stop_times: list[str]) -> bytes:
             zf.writestr(name, text + "\n")
 
     return buf.getvalue()
+
+
+@pytest.fixture
+def make_gtfs_zip() -> Callable[[list[str], list[str]], bytes]:
+    """Builds a GTFS zip from trip ids and stop_times.txt rows."""
+    return _gtfs_zip
 
 
 @pytest.fixture
@@ -70,4 +80,4 @@ def bn1204_zip() -> bytes:
         ]
     ]
 
-    return make_gtfs_zip(["BNSF_BN1204_V2_AA", "BNSF_BN1254_V2_A", "BNSF_BN1254_V2_AA"], rows)
+    return _gtfs_zip(["BNSF_BN1204_V2_AA", "BNSF_BN1254_V2_A", "BNSF_BN1254_V2_AA"], rows)

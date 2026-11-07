@@ -42,41 +42,6 @@ def train_trips(feed: FeedMessage, schedule: gtfs.Schedule, line: str, number: s
     ]
 
 
-def _upcoming(
-    tu: TripUpdate, schedule: gtfs.Schedule, start: datetime.date, tz: ZoneInfo
-) -> tuple[str, datetime.datetime, int] | None:
-    """Returns the next stop's name, expected time and minutes late, or None if there is no next stop.
-
-    The next stop is the first update that is not skipped, has a time, and is in the schedule.
-    """
-    # the next stop, not the worst one: a train can make up time it lost earlier
-    next_stop = next(
-        (
-            update
-            for update in tu.stop_time_update
-            if update.schedule_relationship != SKIPPED
-            and (update.arrival.time or update.departure.time)
-            and (tu.trip.trip_id, update.stop_sequence) in schedule.arrivals
-        ),
-        None,
-    )
-    if next_stop is None:
-        return None
-
-    scheduled_seconds = schedule.arrivals[(tu.trip.trip_id, next_stop.stop_sequence)]
-    expected = next_stop.arrival.time or next_stop.departure.time
-    minutes_late = int((expected - gtfs.scheduled_at(start, scheduled_seconds).timestamp()) // 60)
-
-    stop_name = schedule.stop_names.get(next_stop.stop_id, next_stop.stop_id)
-    return stop_name, datetime.datetime.fromtimestamp(expected, tz), minutes_late
-
-
-def _is_cancelled(tu: TripUpdate) -> bool:
-    return tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED or (
-        bool(tu.stop_time_update) and all(s.schedule_relationship == SKIPPED for s in tu.stop_time_update)
-    )
-
-
 def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input explicitly
     tu: TripUpdate,
     schedule: gtfs.Schedule,
@@ -87,6 +52,8 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     tz: ZoneInfo,
 ) -> message.Decision:
     """Builds a delay message when today's trip is late enough at its next stop.
+
+    The next stop is the first update that is not skipped, has a time, and is in the schedule.
 
     Args:
         tu: The trip update.
@@ -106,17 +73,32 @@ def delay_message(  # noqa: PLR0913, PLR0917 - pure function, takes every input 
     if start != today:
         return None, f"trip runs {start:%a %b %d}, not today"
 
-    upcoming = _upcoming(tu, schedule, start, tz)
-    if upcoming is None:
+    # the next stop, not the worst one: a train can make up time it lost earlier
+    next_stop = next(
+        (
+            update
+            for update in tu.stop_time_update
+            if update.schedule_relationship != SKIPPED
+            and (update.arrival.time or update.departure.time)
+            and (tu.trip.trip_id, update.stop_sequence) in schedule.arrivals
+        ),
+        None,
+    )
+    if next_stop is None:
         return None, "no upcoming stop in schedule"
 
-    stop_name, expected, minutes = upcoming
+    expected = next_stop.arrival.time or next_stop.departure.time
+    scheduled = gtfs.scheduled_at(start, schedule.arrivals[(tu.trip.trip_id, next_stop.stop_sequence)])
+    minutes = int((expected - scheduled.timestamp()) // 60)
     if minutes < event.minutes:
         return None, f"{minutes} min late < {event.minutes}"
 
+    stop_name = schedule.stop_names.get(next_stop.stop_id, next_stop.stop_id)
+    expected_at = datetime.datetime.fromtimestamp(expected, tz)
+
     delay = message.Message(
         title=f"{line} {number}: {minutes} min late",
-        body=f"Next stop {stop_name}, expected {expected:%H:%M}.",
+        body=f"Next stop {stop_name}, expected {expected_at:%H:%M}.",
         priority="default",
         tags="train",
         sid=f"metra-{line}-{number}-{tu.trip.start_date}-delay",
@@ -141,7 +123,11 @@ def cancel_message(tu: TripUpdate, line: str, number: str, today: datetime.date)
         return None, "trip has no start date"
     if start < today:
         return None, f"trip ran {start:%a %b %d}"
-    if not _is_cancelled(tu):
+
+    cancelled = tu.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED or (
+        bool(tu.stop_time_update) and all(update.schedule_relationship == SKIPPED for update in tu.stop_time_update)
+    )
+    if not cancelled:
         return None, "running"
 
     cancellation = message.Message(

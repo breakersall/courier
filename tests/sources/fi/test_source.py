@@ -8,7 +8,6 @@ import pytest
 
 from courier import message
 from courier.sources import fi
-from courier.sources.fi import client
 from courier.sources.fi import settings
 
 FIXTURE = json.loads((pathlib.Path(__file__).parents[2] / "fixtures" / "households.json").read_text())
@@ -59,11 +58,9 @@ async def test_poll_unmatched_check_has_reason() -> None:
     assert "≥ threshold" in battery_check.reason
 
 
-async def test_poll_missing_collar_has_no_checks(caplog: pytest.LogCaptureFixture) -> None:
-    assert await source("Ghost").poll(NOW) == []
+async def test_poll_missing_collar_has_unmatched_checks(caplog: pytest.LogCaptureFixture) -> None:
+    (missing,) = await source("Ghost").poll(NOW)
+
+    assert missing.message is None
+    assert missing.reason == "missing from Fi response"
     assert "Ghost" in caplog.text
-
-
-def test_fi_auth_error_is_source_auth_error() -> None:
-    assert issubclass(client.FiAuthError, message.SourceAuthError)
-    assert issubclass(client.FiError, message.SourceError)

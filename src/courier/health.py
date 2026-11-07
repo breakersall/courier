@@ -62,7 +62,9 @@ def app(health: Health, lifespan: types.Lifespan[applications.Starlette] | None 
         return responses.PlainTextResponse(f"503 Service Unavailable: {', '.join(stale)}", status_code=503)
 
     async def prometheus_metrics(request: requests.Request) -> responses.Response:
-        return responses.Response(metrics.render(), media_type=prometheus_client.CONTENT_TYPE_LATEST)
+        return responses.Response(
+            prometheus_client.generate_latest(metrics.REGISTRY), media_type=prometheus_client.CONTENT_TYPE_LATEST
+        )
 
     return applications.Starlette(
         lifespan=lifespan,

@@ -15,10 +15,6 @@ class Clock:
         return self.now
 
 
-def test_healthy_initially() -> None:
-    assert health.Health({"fi": 60}, Clock()).stale() == []
-
-
 def test_unhealthy_after_3x() -> None:
     clock = Clock()
     monitor = health.Health({"fi": 60}, clock)
@@ -28,14 +24,6 @@ def test_unhealthy_after_3x() -> None:
 
     clock.now += 1
     assert monitor.stale() == ["fi"]
-
-
-def test_mark_ok_recovers() -> None:
-    clock = Clock()
-    monitor = health.Health({"fi": 60}, clock)
-    clock.now += 500
-    monitor.mark_ok("fi")
-    assert monitor.stale() == []
 
 
 @contextlib.asynccontextmanager

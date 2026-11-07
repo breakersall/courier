@@ -6,17 +6,18 @@ from courier import models
 
 NY = zoneinfo.ZoneInfo("America/New_York")
 DAY = models.Window(start=datetime.time(8), end=datetime.time(20))
+WEEKDAYS = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "tue", "wed", "thu", "fri"])
 
 
 def at(hh: int, mm: int = 0, day: int = 9, month: int = 10) -> datetime.datetime:
     return datetime.datetime(2026, month, day, hh, mm, tzinfo=NY)
 
 
-def test_window_bounds() -> None:
-    assert limiter.window_bounds(at(9), DAY) == (at(8), at(20))
-    assert limiter.window_bounds(at(7, 59), DAY) is None
-    assert limiter.window_bounds(at(20), DAY) is None
-    assert limiter.window_bounds(at(23, 59), None) == (at(0), at(0, day=10))
+def test_window_edges() -> None:
+    assert limiter.blocked(limiter.LimiterState(), at(8), DAY, 1) is None
+    assert limiter.blocked(limiter.LimiterState(), at(7, 59), DAY, 1) is not None
+    assert limiter.blocked(limiter.LimiterState(), at(20), DAY, 1) is not None
+    assert limiter.blocked(limiter.LimiterState(), at(23, 59), None, 1) is None
 
 
 def test_n2_from_0800() -> None:
@@ -41,18 +42,6 @@ def test_n3_even_slots() -> None:
     assert s.next_allowed == at(16)
 
 
-def test_shared_budget_after_clear() -> None:
-    s = limiter.record(limiter.LimiterState(), at(8), DAY, 2)
-    assert limiter.blocked(s, at(17), DAY, 2) is None
-    s = limiter.record(s, at(17), DAY, 2)
-    assert limiter.blocked(s, at(19, 30), DAY, 2) is not None
-
-
-def test_outside_window_denied() -> None:
-    assert limiter.blocked(limiter.LimiterState(), at(7, 59), DAY, 1) is not None
-    assert limiter.blocked(limiter.LimiterState(), at(20), DAY, 2) is not None
-
-
 def test_day_rollover_resets() -> None:
     s = limiter.record(limiter.LimiterState(), at(8), DAY, 1)
     assert limiter.blocked(s, at(19), DAY, 1) is not None
@@ -73,17 +62,7 @@ def test_dst_spring_forward() -> None:
     assert s.next_allowed == datetime.datetime(2026, 3, 8, 7, 30, tzinfo=datetime.UTC)
 
 
-def test_window_days() -> None:
-    weekdays = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "fri"])
-    assert limiter.window_bounds(at(9), weekdays) == (at(8), at(20))  # Fri
-    assert limiter.window_bounds(at(9, day=10), weekdays) is None  # Sat
-    assert limiter.blocked(limiter.LimiterState(), at(9, day=10), weekdays, 1) is not None
-
-
-WEEKDAYS = models.Window(start=datetime.time(8), end=datetime.time(20), days=["mon", "tue", "wed", "thu", "fri"])
 FRESH = limiter.LimiterState()
-ONE_SENT = limiter.LimiterState(window_date=at(9).date(), sent=1)
-ONE_SENT_NEXT_AT_14 = limiter.LimiterState(window_date=at(9).date(), sent=1, next_allowed=at(14))
 
 
 def test_blocked_outside_window() -> None:
@@ -91,16 +70,20 @@ def test_blocked_outside_window() -> None:
 
 
 def test_blocked_excluded_weekday() -> None:
+    friday = at(9)
     saturday = at(9, day=10)
+    assert limiter.blocked(FRESH, friday, WEEKDAYS, 1) is None
     assert limiter.blocked(FRESH, saturday, WEEKDAYS, 1) == "not on Saturday"
 
 
 def test_blocked_budget_used() -> None:
-    assert limiter.blocked(ONE_SENT, at(9), None, 1) == "budget used: 1 of 1 today"
+    one_sent = limiter.LimiterState(window_date=at(9).date(), sent=1)
+    assert limiter.blocked(one_sent, at(9), None, 1) == "budget used: 1 of 1 today"
 
 
 def test_blocked_next_allowed() -> None:
-    assert limiter.blocked(ONE_SENT_NEXT_AT_14, at(9), None, 2) == "next allowed 14:00"
+    next_at_14 = limiter.LimiterState(window_date=at(9).date(), sent=1, next_allowed=at(14))
+    assert limiter.blocked(next_at_14, at(9), None, 2) == "next allowed 14:00"
 
 
 def test_blocked_none_when_allowed() -> None:

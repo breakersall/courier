@@ -1,5 +1,4 @@
 import collections
-import dataclasses
 import datetime
 import pathlib
 
@@ -82,10 +81,14 @@ async def test_start_schedule_error_raises(env) -> None:
         await env.source(trains=[train("BNSF", "1204")]).start()
 
 
-async def test_poll_delay_alert_key(env) -> None:
+async def test_poll_delay_check(env) -> None:
     src = env.source(trains=[train("BNSF", "1204")])
     await src.start()
-    assert matched_keys(await src.poll(NOW)) == ["BNSF1204:train_delayed:phone"]
+    (delayed,) = await src.poll(NOW)
+
+    assert delayed.key == "BNSF1204:train_delayed:phone"
+    assert delayed.message is not None
+    assert delayed.reason == "1 min late ≥ 1"
 
 
 async def test_poll_alert_keys_include_alert_id(env) -> None:
@@ -94,18 +97,14 @@ async def test_poll_alert_keys_include_alert_id(env) -> None:
     assert f"HC:service_alert:phone:{ALERT_ID}" in matched_keys(await src.poll(NOW))
 
 
-async def test_train_check_reason(env) -> None:
-    src = env.source(trains=[train("BNSF", "1204")])
-    await src.start()
-    (delayed,) = await src.poll(NOW)
-
-    assert delayed.reason == "1 min late ≥ 1"
-
-
-async def test_train_not_in_feed_has_no_checks(env) -> None:
+async def test_train_not_in_feed_has_unmatched_checks(env) -> None:
     src = env.source(trains=[train("BNSF", "1254")])
     await src.start()
-    assert await src.poll(NOW) == []
+
+    (missing,) = await src.poll(NOW)
+
+    assert missing.message is None
+    assert missing.reason == "not in the realtime feed"
 
 
 async def test_line_without_alerts_has_unmatched_checks(env) -> None:
@@ -170,12 +169,11 @@ async def test_poll_alert_on_two_lines_emitted_once(env) -> None:
     assert keys == [f"HC:service_alert:phone:{ALERT_ID}"]
 
 
-async def test_refresh_warns_for_train_missing_after_reload(env, caplog, monkeypatch) -> None:
+async def test_refresh_warns_for_train_missing_after_reload(env, caplog, make_gtfs_zip) -> None:
     src = env.source(trains=[train("BNSF", "1204")])
     await src.start()
 
-    real = gtfs.load_schedule
-    monkeypatch.setattr(gtfs, "load_schedule", lambda *a: dataclasses.replace(real(*a), trips={}))  # renumbered
+    env.zip = make_gtfs_zip(["BNSF_BN1254_V2_A"], [])  # 1204 renumbered away
     env.published = "v2"
     env.now = 3601
 

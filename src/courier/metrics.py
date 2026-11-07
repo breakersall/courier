@@ -17,8 +17,3 @@ NOTIFICATIONS = prometheus_client.Counter(
 LAST_SUCCESS = prometheus_client.Gauge(
     "courier_last_success_timestamp_seconds", "Unix time of the last successful poll.", ["source"], registry=REGISTRY
 )
-
-
-def render() -> bytes:
-    """Returns every metric in the Prometheus text format."""
-    return prometheus_client.generate_latest(REGISTRY)

@@ -1,9 +1,9 @@
+from collections.abc import Callable
 import datetime
 
 import pytest
 
 from courier.sources.metra import gtfs
-from sources.metra import conftest
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,9 @@ def test_load_schedule_bad_zip_raises_value_error():
         gtfs.load_schedule(b"nope", set())
 
 
-def test_load_schedule_ragged_row_raises_value_error():
-    zip_bytes = conftest.make_gtfs_zip(["BNSF_BN1204_V2_AA"], ["BNSF_BN1204_V2_AA,  05:58:00"])
+def test_load_schedule_ragged_row_raises_value_error(
+    make_gtfs_zip: Callable[[list[str], list[str]], bytes],
+) -> None:
+    zip_bytes = make_gtfs_zip(["BNSF_BN1204_V2_AA"], ["BNSF_BN1204_V2_AA,  05:58:00"])
     with pytest.raises(ValueError, match="invalid GTFS"):
         gtfs.load_schedule(zip_bytes, {("BNSF", "1204")})

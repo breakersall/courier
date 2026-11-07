@@ -118,13 +118,12 @@ class MetraSource:
         self, feed: events.FeedMessage, schedule: gtfs.Schedule, train: settings.Train, today: datetime.date
     ) -> list[message.Check]:
         trips = events.train_trips(feed, schedule, train.line, train.number)
-
-        if not trips:
-            log.debug("Metra train %s %s is not in the realtime feed", train.line, train.number)
-            return []
-
         keys = message.event_keys(f"{train.line}{train.number}", train.events)
         checks = []
+
+        if not trips:
+            for key, event in zip(keys, train.events, strict=True):
+                checks.append(message.Check(key, event, None, "not in the realtime feed"))
 
         for tu in trips:
             for key, event in zip(keys, train.events, strict=True):
